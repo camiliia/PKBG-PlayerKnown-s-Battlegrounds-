@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..core.config import MAX_MEDKITS
-from ..helpers import Vector2, has_line_of_sight, safe_normalize
+from ..helpers import Vector2, safe_normalize
 
 if TYPE_CHECKING:
     from ..entities.bot_player import BotPlayer
@@ -35,6 +35,13 @@ class BotBrain:
         safe_zone: SafeZone,
         rng: random.Random,
     ) -> AIDecision:
+        if not bot.combat_enabled:
+            gear_target = self._select_gear_target(bot, pickups)
+            if gear_target is not None:
+                move_vector = safe_normalize(gear_target.position - bot.position)
+                if move_vector.length_squared() > 0.0:
+                    bot.aim_direction = move_vector
+                return AIDecision([], move_vector, "武装", gear_target.label, gear_target.position.copy())
         visible_target = self._acquire_target(bot, characters, game_map)
         if visible_target:
             bot.memory_target = visible_target.position.copy()
@@ -85,15 +92,21 @@ class BotBrain:
         return AIDecision([], move_vector, "巡逻", "路径点", bot.wander_target.copy())
 
     def _acquire_target(self, bot: BotPlayer, characters: list[CharacterBase], game_map: Map) -> CharacterBase | None:
+        if not bot.combat_enabled:
+            return None
         best_target = None
         best_score = float("inf")
         for candidate in characters:
             if candidate is bot or not candidate.alive:
                 continue
+            if candidate.camp == bot.camp:
+                continue
+            if candidate.is_player_controlled and not (bot.alerted or bot.searching):
+                continue
             distance = bot.position.distance_to(candidate.position)
             if distance > bot.active_weapon.spec.range_limit * 1.18:
                 continue
-            if not has_line_of_sight(bot.position, candidate.position, game_map.obstacles):
+            if not game_map.has_line_of_sight(bot.position, candidate.position):
                 continue
             score = distance - candidate.hp * 0.2
             if candidate.is_player_controlled:
@@ -137,7 +150,7 @@ class BotBrain:
             state = "交战"
             focus = target.position.copy()
 
-        line_clear = has_line_of_sight(bot.position, target.position, game_map.obstacles)
+        line_clear = game_map.has_line_of_sight(bot.position, target.position)
         if bot.active_weapon.magazine <= 0:
             bot.active_weapon.begin_reload(bot)
         should_fire = (
@@ -153,6 +166,18 @@ class BotBrain:
         else:
             projectiles = []
         return projectiles, move_vector, state, focus
+
+    def _select_gear_target(self, bot: BotPlayer, pickups: list[Pickup]) -> Pickup | None:
+        best_pickup = None
+        best_distance = float("inf")
+        for pickup in pickups:
+            if pickup.kind != "gear":
+                continue
+            distance = bot.position.distance_to(pickup.position)
+            if distance < best_distance:
+                best_distance = distance
+                best_pickup = pickup
+        return best_pickup
 
     def _select_loot_target(self, bot: BotPlayer, pickups: list[Pickup]) -> Pickup | None:
         best_pickup = None

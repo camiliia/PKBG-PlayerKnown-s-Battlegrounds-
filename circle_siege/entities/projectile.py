@@ -50,11 +50,11 @@ class Bullet(WorldSprite):
         if not game_map.bounds.collidepoint(self.position):
             self.alive = False
             return self.position, None
-        for obstacle in game_map.obstacles:
-            hitbox = obstacle.rect.inflate(self.radius * 2, self.radius * 2)
-            if hitbox.clipline(previous, self.position):
-                self.alive = False
-                return self.position, None
+        blocking_hit = game_map.segment_hits_blocking(previous, self.position, self.radius)
+        if blocking_hit is not None:
+            self.position = blocking_hit
+            self.alive = False
+            return self.position, None
         for character in characters:
             if character is self.owner or not character.alive:
                 continue

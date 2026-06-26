@@ -43,7 +43,7 @@ class HUDRenderer:
         screen.blit(text, text.get_rect(center=panel.center))
 
     def _draw_top_panel(self, screen: pygame.Surface) -> None:
-        panel = pygame.Rect(18, 16, 400, 224)
+        panel = pygame.Rect(18, 16, 420, 300)
         pygame.draw.rect(screen, (*UI_PANEL, 235), panel, border_radius=16)
         pygame.draw.rect(screen, self.match.player.accent_color, panel, width=2, border_radius=16)
 
@@ -57,11 +57,8 @@ class HUDRenderer:
             f"呼号：{truncate_text(self.game.fonts['small'], self.match.player.name, panel.width - 96)}",
             f"地图：{truncate_text(self.game.fonts['small'], self.match.theme.label, panel.width - 96)}",
             f"区域：{current_region}",
-            f"剩余人数：{self.match.alive_count()}",
-            f"精英单位：{self.match.elite_alive_count()}",
-            f"淘汰：{self.match.player.kills}",
-            f"重生次数：{self.match.respawn_charges}",
-            f"生存时间：{format_time(self.match.elapsed)}",
+            f"剩余单位：{self.match.alive_count()}    精英：{self.match.elite_alive_count()}",
+            f"藏宝图：{self.match.treasure_maps_found}/{self.match.treasure_map_target}    生存：{format_time(self.match.elapsed)}",
             f"缩圈：{zone_label}  {format_time(self.match.safe_zone.time_to_next())}",
         )
         y = panel.top + 14
@@ -70,9 +67,52 @@ class HUDRenderer:
             screen.blit(text, (panel.left + 16, y))
             y += 21
 
-        health_rect = pygame.Rect(panel.left + 16, panel.bottom - 46, panel.width - 32, 14)
+        objective_rect = pygame.Rect(panel.left + 16, y + 4, panel.width - 32, 18)
+        draw_text_block(
+            screen,
+            self.game.fonts["small"],
+            self.match.mission_objective_text(),
+            objective_rect,
+            self.match.player.marker_color,
+            line_spacing=0,
+            max_lines=1,
+        )
+        progress_rect = pygame.Rect(panel.left + 16, objective_rect.bottom + 4, panel.width - 32, 18)
+        draw_text_block(
+            screen,
+            self.game.fonts["tiny"],
+            self.match.mission_progress_text(),
+            progress_rect,
+            TEXT_LIGHT,
+            line_spacing=0,
+            max_lines=1,
+        )
+        alert_rect = pygame.Rect(panel.left + 16, progress_rect.bottom + 6, panel.width - 32, 18)
+        alert_color = (255, 214, 150) if self.match.player_has_agro else TEXT_MUTED
+        draw_text_block(
+            screen,
+            self.game.fonts["tiny"],
+            self.match.local_alert_status_text(),
+            alert_rect,
+            alert_color,
+            line_spacing=0,
+            max_lines=1,
+        )
+        guidance_rect = pygame.Rect(panel.left + 16, alert_rect.bottom + 4, panel.width - 32, 18)
+        guidance_color = self.match.theme.accent if self.match.player.combat_enabled else (255, 214, 150)
+        draw_text_block(
+            screen,
+            self.game.fonts["tiny"],
+            self.match.mission_guidance_text(),
+            guidance_rect,
+            guidance_color,
+            line_spacing=0,
+            max_lines=1,
+        )
+
+        health_rect = pygame.Rect(panel.left + 16, panel.bottom - 42, panel.width - 32, 14)
         draw_progress_bar(screen, health_rect, self.match.player.hp / self.match.player.max_hp, HEALTH_GREEN)
-        armor_rect = pygame.Rect(panel.left + 16, panel.bottom - 24, panel.width - 32, 11)
+        armor_rect = pygame.Rect(panel.left + 16, panel.bottom - 20, panel.width - 32, 11)
         draw_progress_bar(screen, armor_rect, self.match.player.armor / max(1, self.match.player.max_armor), ZONE_BLUE)
 
     def _draw_weapon_panel(self, screen: pygame.Surface) -> None:
@@ -85,11 +125,25 @@ class HUDRenderer:
         weapon_title = self.game.fonts["title"].render(label, True, weapon.spec.color)
         screen.blit(weapon_title, (panel.left + 16, panel.top + 12))
 
-        ammo_text = self.game.fonts["hero_small"].render(f"{weapon.magazine:02d}", True, TEXT_LIGHT)
+        ammo_value = "--" if not self.match.player.combat_enabled else f"{weapon.magazine:02d}"
+        ammo_text = self.game.fonts["hero_small"].render(ammo_value, True, TEXT_LIGHT)
         reserve = self.match.player.ammo.get(weapon.spec.ammo_type, 0)
         reserve_text = self.game.fonts["medium"].render(f"/ {reserve:03d}", True, TEXT_MUTED)
         screen.blit(ammo_text, (panel.left + 16, panel.top + 34))
         screen.blit(reserve_text, (panel.left + 110, panel.top + 62))
+
+        status_line = f"状态：{weapon.state_label(self.match.player)}"
+        if not self.match.player.combat_enabled:
+            status_line += "（拾取武器后可攻击）"
+        draw_text_block(
+            screen,
+            self.game.fonts["tiny"],
+            truncate_text(self.game.fonts["tiny"], status_line, panel.width - 210),
+            pygame.Rect(panel.left + 16, panel.top + 76, panel.width - 210, 18),
+            self.match.player.marker_color if self.match.player.combat_enabled else (255, 214, 150),
+            line_spacing=0,
+            max_lines=1,
+        )
 
         ammo_line = f"弹药：{AMMO_LABELS[weapon.spec.ammo_type]}    医疗包：{self.match.player.medkits}"
         draw_text_block(
@@ -164,7 +218,7 @@ class HUDRenderer:
         screen.blit(minimap, (frame.left + 6, frame.top + 28))
 
     def _draw_killfeed(self, screen: pygame.Surface) -> None:
-        y = 236
+        y = 320
         for banner in self.match.killfeed:
             box = pygame.Rect(18, y, 380, 30)
             pygame.draw.rect(screen, (*UI_PANEL, 220), box, border_radius=10)
@@ -201,7 +255,7 @@ class HUDRenderer:
         spread = 16 + int((weapon.spec.spread + weapon.spec.move_spread * self.match.player.movement_ratio()) * 360)
         mx, my = pygame.mouse.get_pos()
         pygame.draw.circle(screen, (0, 0, 0), (mx, my), 12, width=2)
-        color = weapon.spec.color
+        color = weapon.spec.color if self.match.player.combat_enabled else TEXT_MUTED
         pygame.draw.line(screen, color, (mx - spread, my), (mx - 6, my), 2)
         pygame.draw.line(screen, color, (mx + 6, my), (mx + spread, my), 2)
         pygame.draw.line(screen, color, (mx, my - spread), (mx, my - 6), 2)
@@ -220,6 +274,8 @@ class HUDRenderer:
 
         title = self.game.fonts["medium"].render("操作说明", True, TEXT_LIGHT)
         screen.blit(title, (panel.left + 16, panel.top + 12))
+        tip = self.game.fonts["tiny"].render("先拿武器，再搜图；枪声和爆炸只会惊动附近守卫", True, TEXT_LIGHT)
+        screen.blit(tip, (panel.left + 16, panel.top + 34))
 
         lines = (
             "WASD 移动    Shift 冲刺",
@@ -232,7 +288,7 @@ class HUDRenderer:
             "F4 几何叠层  F6 空投调试",
             "F7 快速推进缩圈",
         )
-        y = panel.top + 42
+        y = panel.top + 58
         for line in lines:
             text = self.game.fonts["tiny"].render(line, True, TEXT_MUTED)
             screen.blit(text, (panel.left + 16, y))

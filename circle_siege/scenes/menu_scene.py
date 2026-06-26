@@ -5,6 +5,7 @@ import pygame
 from ..core.base_scene import BaseScene
 from ..core.config import ARENA_THEMES, PLAYER_SKIN_BY_ID, SCREEN_HEIGHT, SCREEN_WIDTH, TEXT_LIGHT, TEXT_MUTED, UI_PANEL
 from ..helpers import draw_outlined_text, draw_text_block, truncate_text
+from ..maps.map_loader import load_tmx_bundle
 
 
 class MenuScene(BaseScene):
@@ -37,9 +38,27 @@ class MenuScene(BaseScene):
     def _rebuild_preview(self) -> None:
         self.theme = ARENA_THEMES[self.theme_index]
         self.game.selected_theme_id = self.theme.identifier
-        if self.theme.preview_image_path:
+        preview = None
+        if self.theme.identifier == "courtyard_tmx" and self.theme.tmx_path:
+            preview = load_tmx_bundle(self.theme.tmx_path).surface
+        elif self.theme.preview_image_path:
             preview = self.game.resources.load_image(self.theme.preview_image_path)
-            self.preview_surface = pygame.transform.smoothscale(preview, (SCREEN_WIDTH, SCREEN_HEIGHT)).convert()
+        if preview is not None:
+            self.preview_surface = self._cover_scale_preview(preview)
+
+    def _cover_scale_preview(self, preview: pygame.Surface) -> pygame.Surface:
+        source_ratio = preview.get_width() / max(1, preview.get_height())
+        target_ratio = SCREEN_WIDTH / SCREEN_HEIGHT
+        if source_ratio > target_ratio:
+            scaled_height = SCREEN_HEIGHT
+            scaled_width = int(scaled_height * source_ratio)
+        else:
+            scaled_width = SCREEN_WIDTH
+            scaled_height = int(scaled_width / max(source_ratio, 1e-6))
+        scaled = pygame.transform.smoothscale(preview, (scaled_width, scaled_height))
+        frame = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT)).convert()
+        frame.blit(scaled, ((SCREEN_WIDTH - scaled_width) // 2, (SCREEN_HEIGHT - scaled_height) // 2))
+        return frame
 
     def _change_theme(self, direction: int) -> None:
         self.theme_index = (self.theme_index + direction) % len(ARENA_THEMES)

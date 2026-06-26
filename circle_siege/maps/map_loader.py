@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,11 +53,13 @@ class TmxMapBundle:
     regions: list[MapRegion]
     light_zones: list[LightZone]
     minimap_base: pygame.Surface
+    collision_mask: pygame.Mask | None = None
 
 
 def load_tmx_bundle(path: str | Path) -> TmxMapBundle:
     path = Path(path)
     tmx = load_pygame(str(path))
+    has_image_backdrop = any(isinstance(layer, TiledImageLayer) for layer in tmx.layers)
     pixel_width = tmx.width * tmx.tilewidth
     pixel_height = tmx.height * tmx.tileheight
     if tmx.width == 1 and tmx.tilewidth > 256:
@@ -94,6 +97,7 @@ def load_tmx_bundle(path: str | Path) -> TmxMapBundle:
     triggers: list[TriggerZone] = []
     regions: list[MapRegion] = []
     light_zones: list[LightZone] = []
+    collision_mask: pygame.Mask | None = None
 
     object_groups = [layer for layer in tmx.layers if isinstance(layer, TiledObjectGroup)]
     if object_groups:
@@ -103,8 +107,10 @@ def load_tmx_bundle(path: str | Path) -> TmxMapBundle:
                 position = Vector2(obj.x, obj.y)
                 label = obj.name or group.name
                 rect = _object_rect(obj, default_size=96)
-                if group_name in {"obstacle", "collision", "building"} and obj.width and obj.height:
-                    obstacle = pygame.Rect(int(obj.x), int(obj.y), int(obj.width), int(obj.height))
+                if group_name in {"obstacle", "collision", "building"}:
+                    if hasattr(obj, "visible") and not obj.visible:
+                        continue
+                    obstacle = _obstacle_rect(obj, has_image_backdrop=has_image_backdrop)
                     obstacles.append(ObstacleDef(rect=obstacle, label=label))
                     cover_points.extend(_cover_points_from_rect(obstacle))
                     if group_name == "building":
@@ -139,12 +145,16 @@ def load_tmx_bundle(path: str | Path) -> TmxMapBundle:
     else:
         layer_lookup = {getattr(layer, "name", "").lower(): layer for layer in tmx.layers if isinstance(layer, TiledTileLayer)}
         collision_layers = [layer_lookup[name] for name in ("house", "tree") if name in layer_lookup]
+        collision_surface = pygame.Surface((pixel_width, pixel_height), pygame.SRCALPHA)
         for layer in collision_layers:
             for x, y, gid in layer.iter_data():
                 if gid:
                     rect = pygame.Rect(x * tmx.tilewidth, y * tmx.tileheight, tmx.tilewidth, tmx.tileheight)
                     obstacles.append(ObstacleDef(rect=rect))
                     cover_points.append(Vector2(rect.center))
+                    image = tmx.get_tile_image_by_gid(gid)
+                    if image is not None:
+                        collision_surface.blit(image, rect.topleft)
         walk_layer = layer_lookup.get("path") or layer_lookup.get("ground")
         if walk_layer is not None:
             for x, y, gid in walk_layer.iter_data():
@@ -173,6 +183,11 @@ def load_tmx_bundle(path: str | Path) -> TmxMapBundle:
     if not cover_points:
         cover_points = [point.copy() for point in spawn_points]
 
+    if collision_mask is None and 'collision_surface' in locals():
+        collision_mask = pygame.mask.from_surface(collision_surface)
+    if collision_mask is not None:
+        obstacles = []
+
     minimap_base = pygame.transform.smoothscale(surface, (220, 188)).convert()
     return TmxMapBundle(
         pixel_size=(pixel_width, pixel_height),
@@ -186,6 +201,7 @@ def load_tmx_bundle(path: str | Path) -> TmxMapBundle:
         regions=regions,
         light_zones=light_zones,
         minimap_base=minimap_base,
+        collision_mask=collision_mask,
     )
 
 
@@ -196,6 +212,26 @@ def _cover_points_from_rect(rect: pygame.Rect) -> list[Vector2]:
         Vector2(rect.centerx, rect.top - 18),
         Vector2(rect.centerx, rect.bottom + 18),
     ]
+
+
+def _obstacle_rect(obj, *, has_image_backdrop: bool) -> pygame.Rect:
+    width = int(round(getattr(obj, "width", 0) or 0))
+    height = int(round(getattr(obj, "height", 0) or 0))
+    min_thickness = 20 if has_image_backdrop else 12
+    collision_pad = 10 if has_image_backdrop else 2
+
+    if width <= 0 and height <= 0:
+        rect = pygame.Rect(int(round(obj.x - min_thickness / 2)), int(round(obj.y - min_thickness / 2)), min_thickness, min_thickness)
+    else:
+        if width <= 0:
+            width = min_thickness
+        if height <= 0:
+            height = min_thickness
+        rect = pygame.Rect(int(round(obj.x)), int(round(obj.y)), width, height)
+
+    if collision_pad > 0:
+        rect = rect.inflate(collision_pad * 2, collision_pad * 2)
+    return rect
 
 
 def _object_rect(obj, default_size: int) -> pygame.Rect:

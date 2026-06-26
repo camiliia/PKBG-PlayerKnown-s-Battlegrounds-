@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from ..core.events import post_reload_complete
@@ -11,6 +12,26 @@ from ..helpers import Vector2, safe_normalize
 if TYPE_CHECKING:
     from .character import CharacterBase
     from .projectile import Bullet
+
+
+class WeaponState(str, Enum):
+    LOCKED = "locked"
+    READY = "ready"
+    COOLDOWN = "cooldown"
+    RELOADING = "reloading"
+    EMPTY = "empty"
+    OUT_OF_AMMO = "out_of_ammo"
+
+    @property
+    def label(self) -> str:
+        return {
+            WeaponState.LOCKED: "待武装",
+            WeaponState.READY: "就绪",
+            WeaponState.COOLDOWN: "冷却中",
+            WeaponState.RELOADING: "换弹中",
+            WeaponState.EMPTY: "弹夹为空",
+            WeaponState.OUT_OF_AMMO: "备弹不足",
+        }[self]
 
 
 class Weapon:
@@ -23,6 +44,24 @@ class Weapon:
     @property
     def is_reloading(self) -> bool:
         return self.reload_timer > 0.0
+
+    def state_for(self, owner: CharacterBase) -> WeaponState:
+        if self.spec.identifier == "unarmed":
+            return WeaponState.LOCKED
+        if not owner.combat_enabled:
+            return WeaponState.LOCKED
+        if self.reload_timer > 0.0:
+            return WeaponState.RELOADING
+        if self.cooldown > 0.0:
+            return WeaponState.COOLDOWN
+        if self.magazine <= 0:
+            if owner.ammo.get(self.spec.ammo_type, 0) > 0:
+                return WeaponState.EMPTY
+            return WeaponState.OUT_OF_AMMO
+        return WeaponState.READY
+
+    def state_label(self, owner: CharacterBase) -> str:
+        return self.state_for(owner).label
 
     def update(self, dt: float, owner: CharacterBase) -> None:
         self.cooldown = max(0.0, self.cooldown - dt)
@@ -37,6 +76,8 @@ class Weapon:
                 post_reload_complete(owner.name, self.spec.label, owner.is_player_controlled)
 
     def begin_reload(self, owner: CharacterBase) -> bool:
+        if not owner.combat_enabled:
+            return False
         if self.reload_timer > 0.0:
             return False
         if self.magazine >= self.spec.magazine_size:
@@ -47,8 +88,8 @@ class Weapon:
         owner.state = "reload"
         return True
 
-    def can_fire(self) -> bool:
-        return self.cooldown <= 0.0 and self.reload_timer <= 0.0 and self.magazine > 0
+    def can_fire(self, owner: CharacterBase) -> bool:
+        return self.state_for(owner) == WeaponState.READY
 
     def fire(
         self,
@@ -59,7 +100,7 @@ class Weapon:
     ) -> list[Bullet]:
         from .projectile import Bullet
 
-        if not self.can_fire():
+        if not self.can_fire(owner):
             return []
         direction = safe_normalize(direction)
         if direction.length_squared() <= 0:
@@ -78,7 +119,7 @@ class Weapon:
                 Bullet(
                     position=spawn,
                     velocity=velocity,
-                    damage=self.spec.damage,
+                    damage=max(1, int(round(self.spec.damage * owner.damage_multiplier))),
                     radius=self.spec.projectile_radius,
                     remaining_range=self.spec.range_limit,
                     owner=owner,

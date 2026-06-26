@@ -40,6 +40,11 @@ class BotPlayer(CharacterBase):
         )
         self.is_elite = role == "elite"
         self.equip_weapon(weapon_spec)
+        self.combat_enabled = True
+        self.damage_multiplier = 0.5 if self.is_elite else 0.42
+        self.alerted = False
+        self.alert_timer = 0.0
+        self.search_timer = 0.0
         self.medkits = rng.randint(1, 3) if self.is_elite else rng.randint(0, 2)
         self.aggression = rng.uniform(1.05, 1.24) if self.is_elite else rng.uniform(0.92, 1.12)
         self.accuracy = rng.uniform(1.08, 1.22) if self.is_elite else rng.uniform(0.9, 1.08)
@@ -63,6 +68,12 @@ class BotPlayer(CharacterBase):
         rng: random.Random,
     ):
         self.update_common(dt)
+        if self.alert_timer > 0.0:
+            self.alert_timer = max(0.0, self.alert_timer - dt)
+            if self.alert_timer == 0.0:
+                self.alerted = False
+        if self.search_timer > 0.0:
+            self.search_timer = max(0.0, self.search_timer - dt)
         if not self.alive:
             return []
 
@@ -79,3 +90,33 @@ class BotPlayer(CharacterBase):
         if decision.state != "交战" and self.active_weapon.magazine < max(4, self.active_weapon.spec.magazine_size // 3):
             self.active_weapon.begin_reload(self)
         return decision.projectiles
+
+    @property
+    def searching(self) -> bool:
+        return self.search_timer > 0.0
+
+    def set_alerted(
+        self,
+        duration: float,
+        source: Vector2 | None = None,
+        investigation_time: float | None = None,
+    ) -> None:
+        self.alerted = True
+        self.alert_timer = max(self.alert_timer, duration)
+        self.search_timer = max(self.search_timer, duration * 0.82)
+        if source is not None:
+            self.memory_target = source.copy()
+            self.memory_timer = max(self.memory_timer, investigation_time if investigation_time is not None else duration * 0.65)
+            self.wander_target = source.copy()
+
+    def set_searching(
+        self,
+        duration: float,
+        source: Vector2 | None = None,
+        investigation_time: float | None = None,
+    ) -> None:
+        self.search_timer = max(self.search_timer, duration)
+        if source is not None:
+            self.memory_target = source.copy()
+            self.memory_timer = max(self.memory_timer, investigation_time if investigation_time is not None else duration * 0.9)
+            self.wander_target = source.copy()

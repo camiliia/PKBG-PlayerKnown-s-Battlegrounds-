@@ -27,6 +27,7 @@ class Player(CharacterBase):
             camp="player",
         )
         self.is_player_controlled = True
+        self.damage_multiplier = 1.1
         self.profile = profile
         self.skin = skin
         self.skill_name = "位移冲刺"

@@ -30,6 +30,12 @@ TEXT_MUTED = (156, 168, 176)
 HEALTH_GREEN = (78, 194, 118)
 ZONE_BLUE = (92, 172, 255)
 ZONE_DANGER = (235, 116, 116)
+ZONE_INITIAL_MARGIN = 220.0
+ZONE_INITIAL_HOLD_BONUS = 18.0
+ZONE_INITIAL_SHRINK_BONUS = 5.0
+SPAWN_MIN_SEPARATION = 420.0
+STARTUP_GEAR_OFFSET_MIN = 108.0
+STARTUP_GEAR_OFFSET_MAX = 168.0
 
 PLAYER_SPEED = 215
 SPRINT_MULTIPLIER = 1.4
@@ -60,6 +66,7 @@ AMMO_LABELS = {
     "9mm": "9 毫米",
     "12g": "12 号霰弹",
     "7.62": "7.62 毫米",
+    "none": "未装备",
 }
 
 
@@ -159,6 +166,24 @@ ArenaThemeMeta = MapData
 
 
 WEAPON_LIBRARY = {
+    "unarmed": WeaponData(
+        identifier="unarmed",
+        label="未装备",
+        ammo_type="none",
+        damage=0,
+        projectile_speed=0.0,
+        fire_interval=0.25,
+        reload_time=0.0,
+        magazine_size=0,
+        spread=0.0,
+        move_spread=0.0,
+        projectile_radius=0,
+        range_limit=0.0,
+        color=(160, 174, 188),
+        desired_distance=0,
+        pickup_ammo_bonus=0,
+        score=0,
+    ),
     "carbine": WeaponData(
         identifier="carbine",
         label="飓风卡宾枪",
@@ -257,7 +282,7 @@ ARENA_THEMES = (
         width=3840,
         height=2560,
         tmx_path=str(TMX_ROOT / "cyber_city.tmx"),
-        preview_image_path=str(RESOURCE_ROOT / "img" / "cyber_city_bg.png"),
+        preview_image_path=str(RESOURCE_ROOT / "img" / "cyber_city_bg_v4.png"),
     ),
     MapData(
         identifier="village_tmx",
@@ -320,7 +345,7 @@ DEFAULT_GAME_CONFIG = GameConfig(
 )
 
 DEFAULT_MATCH_CONFIG = MatchConfig(
-    mode="生存模式",
+    mode="寻宝模式",
     match_time_limit=540.0,
     kill_target=1,
     respawn_time=0.0,

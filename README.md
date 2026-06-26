@@ -42,7 +42,7 @@ circle_siege/
 - 全中文菜单、对局 HUD、拾取提示、战报和结算界面
 - 3 套主题地图
 - `赛博都市雨夜竞技场`：`cyber_city.tmx`
-  背景层自动导入 `resource/img/cyber_city_bg.png`
+  背景层自动导入 `resource/img/cyber_city_bg_v4.png`
 - `山村聚落`：`village1.tmx`
 - `古寺遗址`：`temple1.tmx`
 - `庭院迷阵`：`scene.tmx`

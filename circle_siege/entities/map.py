@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 
 import pygame
 
 from ..core.config import DEFAULT_THEME_ID, THEME_BY_ID, WORLD_HEIGHT, WORLD_WIDTH
-from ..helpers import Vector2
+from ..helpers import Vector2, circle_rect_collision
 from ..maps.map_loader import LightZone, MapRegion, ObstacleDef, TriggerZone, load_tmx_bundle
 
 
@@ -17,6 +18,7 @@ class Obstacle:
     edge_color: tuple[int, int, int]
     shadow_color: tuple[int, int, int]
     border_radius: int = 8
+    blocks_movement: bool = True
     blocks_sight: bool = True
     label: str = ""
     visible: bool = True
@@ -59,6 +61,8 @@ class Map:
         self.light_zones: list[LightZone] = []
         self.regions: list[MapRegion] = []
         self.parallax_layers: list[tuple[pygame.Surface, float, int]] = []
+        self.collision_mask: pygame.Mask | None = None
+        self.open_passages: dict[str, pygame.Rect] = {}
         self.ground_surface = pygame.Surface((WORLD_WIDTH, WORLD_HEIGHT)).convert()
         self.minimap_base = pygame.Surface((220, 188)).convert()
         if self.theme.tmx_path:
@@ -76,6 +80,7 @@ class Map:
         self.triggers = bundle.triggers
         self.light_zones = bundle.light_zones
         self.regions = bundle.regions
+        self.collision_mask = bundle.collision_mask
         self.obstacles = [
             Obstacle(
                 rect=info.rect,
@@ -83,6 +88,7 @@ class Map:
                 edge_color=(0, 0, 0),
                 shadow_color=(0, 0, 0),
                 border_radius=0,
+                blocks_movement=True,
                 blocks_sight=info.blocks_sight,
                 label=info.label,
                 visible=False,
@@ -166,6 +172,61 @@ class Map:
         ]
         self.parallax_layers = self._build_cyber_parallax_layers()
 
+    def blocks_circle(self, center: Vector2, radius: float) -> bool:
+        if self.point_in_open_passage(center):
+            return False
+        for obstacle in self.obstacles:
+            if not obstacle.blocks_movement:
+                continue
+            if circle_rect_collision(center, radius, obstacle.rect):
+                return True
+        if self.collision_mask is not None:
+            return self._mask_hits_circle(center, radius)
+        return False
+
+    def segment_hits_blocking(self, start: Vector2, end: Vector2, radius: float = 0.0) -> Vector2 | None:
+        if self.open_passages or self.collision_mask is not None:
+            steps = max(2, int(start.distance_to(end) / 3.0))
+            for index in range(1, steps + 1):
+                point = start.lerp(end, index / steps)
+                if self.blocks_circle(point, radius):
+                    return point
+            return None
+        for obstacle in self.obstacles:
+            if not obstacle.blocks_sight:
+                continue
+            rect = obstacle.rect.inflate(int(radius * 2), int(radius * 2)) if radius > 0.0 else obstacle.rect
+            if rect.clipline(start, end):
+                return Vector2(end)
+        if self.collision_mask is not None:
+            steps = max(2, int(start.distance_to(end) / 3.0))
+            for index in range(1, steps + 1):
+                point = start.lerp(end, index / steps)
+                if self._mask_hits_circle(point, radius):
+                    return point
+        return None
+
+    def has_line_of_sight(self, start: Vector2, end: Vector2) -> bool:
+        return self.segment_hits_blocking(start, end) is None
+
+    def point_in_open_passage(self, point: Vector2) -> bool:
+        return any(rect.collidepoint(int(point.x), int(point.y)) for rect in self.open_passages.values())
+
+    def _mask_hits_circle(self, center: Vector2, radius: float) -> bool:
+        if self.collision_mask is None:
+            return False
+        samples = [(center.x, center.y)]
+        if radius > 0.0:
+            for angle in range(0, 360, 30):
+                radians = math.radians(angle)
+                samples.append((center.x + math.cos(radians) * radius, center.y + math.sin(radians) * radius))
+        for px, py in samples:
+            ix = int(round(px))
+            iy = int(round(py))
+            if 0 <= ix < self.bounds.width and 0 <= iy < self.bounds.height and self.collision_mask.get_at((ix, iy)):
+                return True
+        return False
+
     def _generate_fallback(self) -> None:
         self.ground_surface.fill((58, 86, 58))
         self.minimap_base.fill((33, 50, 38))
@@ -205,9 +266,16 @@ class Map:
             if obstacle.visible and view.colliderect(obstacle.rect):
                 obstacle.draw(surface, camera)
 
-    def set_gate_state(self, prefix: str, is_open: bool) -> None:
+    def set_gate_state(self, prefix: str, is_open: bool, region_rect: pygame.Rect | None = None) -> None:
+        if is_open and region_rect is not None:
+            self.open_passages[prefix] = region_rect.copy()
+        else:
+            self.open_passages.pop(prefix, None)
         for obstacle in self.obstacles:
-            if obstacle.label.startswith(prefix):
+            matches_prefix = obstacle.label.startswith(prefix)
+            inside_region = region_rect is not None and region_rect.contains(obstacle.rect)
+            if matches_prefix or inside_region:
+                obstacle.blocks_movement = not is_open
                 obstacle.blocks_sight = not is_open
                 obstacle.visible = not is_open
 
@@ -217,7 +285,7 @@ class Map:
                 rng.randint(margin, max(margin + 1, self.bounds.width - margin)),
                 rng.randint(margin, max(margin + 1, self.bounds.height - margin)),
             )
-            if any(obstacle.rect.inflate(60, 60).collidepoint(point) for obstacle in self.obstacles):
+            if self.blocks_circle(point, 30.0):
                 continue
             return point
         return Vector2(self.bounds.width / 2, self.bounds.height / 2)

@@ -17,6 +17,7 @@ from ..core.config import (
     WeaponSpec,
 )
 from ..helpers import Vector2, safe_normalize
+from .animation_controller import AnimationController
 from .map import Map
 from .sprite_base import WorldSprite
 from .weapon import Weapon
@@ -58,6 +59,8 @@ class CharacterBase(WorldSprite):
         self.max_armor = stats.max_armor
         self.armor = stats.max_armor
         self.alive = True
+        self.combat_enabled = False
+        self.damage_multiplier = 1.0
         self.state = "idle"
         self.weapons: list[Weapon] = []
         self.active_weapon_index = 0
@@ -77,7 +80,10 @@ class CharacterBase(WorldSprite):
         self.last_attacker: CharacterBase | None = None
         self.is_player_controlled = False
         self.respawn_anchor = self.position.copy()
+        self.state_time = 0.0
+        self._tracked_state = self.state
         self.sprite_base: pygame.Surface | None = None
+        self.animation_controller: AnimationController | None = None
         self.sprite_scale = 1.0
         self.sprite_default_angle = 45.0
         self.ground_effect_base: pygame.Surface | None = None
@@ -94,10 +100,57 @@ class CharacterBase(WorldSprite):
     def current_weapon(self) -> Weapon:
         return self.active_weapon
 
+    @property
+    def weapon_state_label(self) -> str:
+        return self.active_weapon.state_label(self)
+
     def set_sprite_asset(self, surface: pygame.Surface, scale: float = 1.0, default_angle: float = 45.0) -> None:
         self.sprite_base = surface
         self.sprite_scale = scale
         self.sprite_default_angle = default_angle
+        self.animation_controller = AnimationController(surface, scale=scale, default_angle=default_angle)
+
+    def set_directional_sprite_sheet(
+        self,
+        sheet_surface: pygame.Surface,
+        *,
+        scale: float = 1.0,
+        default_angle: float = 45.0,
+    ) -> None:
+        self.sprite_scale = scale
+        self.sprite_default_angle = default_angle
+        self.animation_controller = AnimationController.from_direction_sheet(
+            sheet_surface,
+            scale=scale,
+            default_angle=default_angle,
+        )
+        self.sprite_base = self.animation_controller.directional_bases.get("east")
+
+    def set_animation_sheets(
+        self,
+        *,
+        idle_sheet: pygame.Surface,
+        move_sheet: pygame.Surface,
+        fire_sheet: pygame.Surface,
+        dead_sheet: pygame.Surface,
+        sheet_direction_orders: dict[str, tuple[str, ...]] | None = None,
+        scale: float = 1.0,
+        default_angle: float = 45.0,
+    ) -> None:
+        self.sprite_scale = scale
+        self.sprite_default_angle = default_angle
+        self.animation_controller = AnimationController.from_state_sheets(
+            {
+                "idle": idle_sheet,
+                "move": move_sheet,
+                "fire": fire_sheet,
+                "dead": dead_sheet,
+            },
+            sheet_direction_orders=sheet_direction_orders,
+            scale=scale,
+            default_angle=default_angle,
+        )
+        self.sprite_base = self.animation_controller.directional_bases.get("east")
 
     def set_effect_assets(
         self,
@@ -115,6 +168,11 @@ class CharacterBase(WorldSprite):
             self.shield_effect_scale = shield_scale
 
     def equip_weapon(self, spec: WeaponSpec, as_active: bool = True) -> WeaponSpec | None:
+        if len(self.weapons) == 1 and self.weapons[0].spec.identifier == "unarmed":
+            self.weapons[0] = Weapon(spec)
+            self.active_weapon_index = 0
+            self.ammo[spec.ammo_type] = self.ammo.get(spec.ammo_type, 0) + spec.pickup_ammo_bonus
+            return None
         for weapon in self.weapons:
             if weapon.spec.identifier == spec.identifier:
                 self.ammo[spec.ammo_type] = self.ammo.get(spec.ammo_type, 0) + spec.pickup_ammo_bonus
@@ -134,7 +192,16 @@ class CharacterBase(WorldSprite):
         if len(self.weapons) > 1:
             self.active_weapon_index = (self.active_weapon_index + 1) % len(self.weapons)
 
+    def arm_combat(self) -> bool:
+        if self.combat_enabled:
+            return False
+        self.combat_enabled = True
+        if self.state == "idle":
+            self.state = "move" if self.velocity.length_squared() > 0.0 else "idle"
+        return True
+
     def update_common(self, dt: float) -> None:
+        self._sync_state_clock(dt)
         if not self.alive:
             return
         for weapon in self.weapons:
@@ -162,14 +229,21 @@ class CharacterBase(WorldSprite):
         return True
 
     def can_throw_grenade(self) -> bool:
-        return self.alive and self.grenade_count > 0 and self.heal_timer <= 0.0
+        return self.alive and self.combat_enabled and self.grenade_count > 0 and self.heal_timer <= 0.0
 
-    def take_damage(self, amount: int, attacker: CharacterBase | None) -> bool:
+    def take_damage(self, amount: int, attacker: CharacterBase | None, minimum_hp: int = 0) -> bool:
         if not self.alive or self.invulnerable_timer > 0.0:
             return False
+        minimum_hp = max(0, min(self.max_hp, minimum_hp))
         absorbed = min(self.armor, amount // 2)
         self.armor -= absorbed
-        self.hp -= max(1, amount - absorbed)
+        damage_to_hp = max(1, amount - absorbed)
+        if minimum_hp > 0:
+            if self.hp <= minimum_hp:
+                damage_to_hp = 0
+            else:
+                damage_to_hp = min(damage_to_hp, self.hp - minimum_hp)
+        self.hp -= damage_to_hp
         self.heal_timer = 0.0
         self.damage_flash_timer = 0.18
         self.last_attacker = attacker
@@ -194,6 +268,8 @@ class CharacterBase(WorldSprite):
         self.invulnerable_timer = 2.4
         self.alive = True
         self.state = "idle"
+        self.state_time = 0.0
+        self._tracked_state = self.state
         self.last_move = Vector2()
 
     def movement_ratio(self) -> float:
@@ -215,14 +291,18 @@ class CharacterBase(WorldSprite):
                 self.state = "idle"
             return
         self.state = "run" if speed > self.move_speed * 1.1 else "move"
+        previous_x = self.position.x
         self.position.x += delta.x
-        self._resolve_collisions(game_map, axis="x")
+        self._resolve_collisions(game_map, axis="x", fallback_position=previous_x)
+        previous_y = self.position.y
         self.position.y += delta.y
-        self._resolve_collisions(game_map, axis="y")
+        self._resolve_collisions(game_map, axis="y", fallback_position=previous_y)
         self.position.x = max(self.radius, min(game_map.bounds.right - self.radius, self.position.x))
         self.position.y = max(self.radius, min(game_map.bounds.bottom - self.radius, self.position.y))
 
-    def _resolve_collisions(self, game_map: Map, axis: str) -> None:
+    def _resolve_collisions(self, game_map: Map, axis: str, fallback_position: float) -> None:
+        if game_map.point_in_open_passage(self.position):
+            return
         hitbox = pygame.Rect(0, 0, self.radius * 2, self.radius * 2)
         hitbox.center = (round(self.position.x), round(self.position.y))
         for obstacle in game_map.obstacles:
@@ -240,9 +320,14 @@ class CharacterBase(WorldSprite):
                 elif self.last_move.y < 0:
                     hitbox.top = obstacle.rect.bottom + MELEE_BUFFER // 2
                 self.position.y = hitbox.centery
+        if game_map.collision_mask is not None and game_map.blocks_circle(self.position, self.radius):
+            if axis == "x":
+                self.position.x = fallback_position
+            else:
+                self.position.y = fallback_position
 
     def fire(self, rng: random.Random):
-        if self.heal_timer > 0.0 or not self.alive:
+        if self.heal_timer > 0.0 or not self.alive or not self.combat_enabled:
             return []
         bullets = self.active_weapon.fire(self, self.aim_direction, self.movement_ratio(), rng)
         if bullets:
@@ -250,8 +335,24 @@ class CharacterBase(WorldSprite):
         return bullets
 
     def auto_reload(self) -> None:
-        if self.active_weapon.magazine <= 0:
+        if self.combat_enabled and self.active_weapon.magazine <= 0:
             self.active_weapon.begin_reload(self)
+
+    def _sync_state_clock(self, dt: float = 0.0) -> None:
+        if self.state != self._tracked_state:
+            self._tracked_state = self.state
+            self.state_time = 0.0
+        else:
+            self.state_time += dt
+
+    def _animation_state_name(self) -> str:
+        if not self.alive:
+            return "dead"
+        if self.muzzle_flash_timer > 0.0 or self.state == "fire":
+            return "fire"
+        if self.state in {"move", "run", "dash"} and self.movement_ratio() > 0.02:
+            return "move"
+        return "idle"
 
     def rect(self) -> pygame.Rect:
         rect = pygame.Rect(0, 0, self.radius * 2, self.radius * 2)
@@ -399,6 +500,7 @@ class CharacterBase(WorldSprite):
         pygame.draw.line(image, (26, 30, 34), weapon_tail, weapon_tip, 5)
 
     def sync_visual(self, camera: Vector2) -> None:
+        self._sync_state_clock(0.0)
         canvas_size = self.radius * 2 + 58
         center = Vector2(canvas_size / 2, canvas_size / 2)
         image = pygame.Surface((canvas_size, canvas_size), pygame.SRCALPHA)
@@ -417,17 +519,11 @@ class CharacterBase(WorldSprite):
         shadow_rect.center = (int(body_center.x + 3), int(body_center.y + 7))
         pygame.draw.ellipse(image, (10, 12, 14, 118), shadow_rect)
 
-        if self.sprite_base is not None:
+        if self.sprite_base is not None or self.animation_controller is not None:
             mask_surface = pygame.Surface((canvas_size, canvas_size), pygame.SRCALPHA)
-            angle_deg = math.degrees(math.atan2(forward.y, forward.x))
-            rotation = self.sprite_default_angle - angle_deg
-            scale = self.sprite_scale * (1.02 if self.state == "run" else 1.0)
-            sprite = pygame.transform.rotozoom(self.sprite_base, rotation, scale)
-            sprite = sprite.copy()
-            if not self.alive:
-                sprite.fill((126, 126, 126, 220), special_flags=pygame.BLEND_RGBA_MULT)
-                sprite = pygame.transform.rotate(sprite, 84)
-            elif self.damage_flash_timer > 0.0:
+            controller = self.animation_controller
+            sprite = controller.get_frame(forward, self._animation_state_name(), self.state_time).copy() if controller is not None else self.sprite_base.copy()
+            if self.damage_flash_timer > 0.0 and self.alive:
                 sprite.fill((34, 0, 0, 0), special_flags=pygame.BLEND_RGBA_SUB)
                 sprite.fill((84, 24, 24, 0), special_flags=pygame.BLEND_RGBA_ADD)
             sprite_rect = sprite.get_rect(center=(int(body_center.x), int(body_center.y)))
