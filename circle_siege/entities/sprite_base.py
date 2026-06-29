@@ -13,7 +13,7 @@ class WorldSprite(pygame.sprite.Sprite):
         self.rect = self.image.get_rect()
         self.mask = pygame.mask.from_surface(self.image)
 
-    def sync_visual(self, camera: Vector2) -> None:
+    def sync_visual(self, camera) -> None:
         raise NotImplementedError
 
     def world_rect(self) -> pygame.Rect:

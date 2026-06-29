@@ -20,6 +20,7 @@ from ..helpers import draw_outlined_text, truncate_text
 class ProfileScene(BaseScene):
     def __init__(self, game) -> None:
         super().__init__(game)
+        self.game.audio.stop_ambient()
         self.game.audio.play_music("menu")
         self.callsign = game.player_profile.callsign
         self.skin_index = next(

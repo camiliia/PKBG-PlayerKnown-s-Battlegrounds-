@@ -46,6 +46,7 @@ from ..entities.projectile import Grenade
 from ..helpers import Vector2, lerp, lerp_vec
 from ..systems.collision import CollisionManager
 from ..systems.particles import ParticleSystem
+from .progression import get_next_theme_id
 
 
 @dataclass
@@ -146,16 +147,27 @@ class SafeZone:
         return max(0.0, self.state_timer)
 
     def random_patrol_point(self, rng: random.Random, game_map: Map) -> Vector2:
+        if game_map.walkable_points:
+            candidates = [point.copy() for point in game_map.walkable_points if not self.is_outside(point)]
+            if candidates:
+                return rng.choice(candidates)
+            fallback = game_map.find_nearest_walkable_point(
+                self.current_center,
+                clearance=30.0,
+                search_limit=max(self.world_width, self.world_height) * 0.35,
+            )
+            if fallback is not None:
+                return fallback
         for _ in range(60):
             angle = rng.uniform(0.0, math.tau)
-            radius = rng.uniform(0.1, 0.9) * min(self.current_radius, 560)
+            radius = rng.uniform(0.12, 0.92) * self.current_radius
             candidate = self.current_center + Vector2(math.cos(angle), math.sin(angle)) * radius
             if not game_map.bounds.collidepoint(candidate):
                 continue
-            if any(obstacle.rect.inflate(40, 40).collidepoint(candidate) for obstacle in game_map.obstacles):
+            if not game_map.is_walkable_point(candidate, clearance=30.0):
                 continue
             return candidate
-        return self.current_center.copy()
+        return game_map.find_nearest_walkable_point(self.current_center, clearance=30.0, search_limit=220.0) or self.current_center.copy()
 
     def force_advance(self) -> None:
         if self.state != "final":
@@ -206,6 +218,11 @@ class MatchManager:
         self.last_local_alert_count = 0
         self.treasure_map_target = 3
         self.treasure_maps_found = 0
+        self.treasure_sites: list[Vector2] = []
+        self.contested_treasure_sites: set[str] = set()
+        self.player_energy_gained = 0
+        self.treasure_guard_bosses: list[BotPlayer] = []
+        self._music_state = "battle"
         self.spawn_positions = self._build_spawn_positions(self.config.player_count)
 
         self.player = self._spawn_player()
@@ -214,14 +231,11 @@ class MatchManager:
         self.characters = [self.player, *self.bots]
         self._spawn_startup_gear()
         self._spawn_loot()
-        self.announcements.append(Banner("开局先拿武器，再搜集 3 张藏宝图完成任务。", (255, 220, 148), ttl=4.2))
-        self.announcements.append(Banner(f"已部署到 {self.theme.label}。枪声和爆炸只会触发局部警戒。", self.theme.accent))
-        self.announcements.append(Banner("开局先拾取武器，再搜集 3 张藏宝图完成任务。", (255, 220, 148), ttl=4.2))
-        self.announcements.append(Banner(f"已部署到 {self.theme.label}。枪声和爆炸只会惊动附近守卫。", self.theme.accent))
+        self._assign_guard_roles()
+        self.announcements.append(Banner("Find weapons, then collect 3 treasure maps to complete the mission.", (255, 220, 148), ttl=4.2))
+        self.announcements.append(Banner(f"Deployed to {self.theme.identifier}. Only attacked enemies engage; treasure maps have boss guards.", self.theme.accent))
         if self.elite_bots:
-            self.announcements.append(Banner("侦测到精英猎手信号。留意高威胁目标。", (255, 146, 146), ttl=4.2))
-        if self.elite_bots:
-            self.announcements.insert(2, Banner("侦测到精英猎手信号。高价值区域存在更强火力。", (255, 146, 146), ttl=4.2))
+            self.announcements.insert(2, Banner("Elite guards detected near high-value areas.", (255, 146, 146), ttl=4.2))
         self.announcements = self.announcements[: 3 if self.elite_bots else 2]
 
     def _theme_weapon_pool(self) -> tuple[str, ...]:
@@ -232,9 +246,53 @@ class MatchManager:
         return ("smg", "carbine", "smg", "carbine", "shotgun")
 
     def _elite_bot_count_for_theme(self) -> int:
-        if self.theme_id in {"cyber_city_tmx", "temple_tmx"}:
-            return 1
-        return 0
+        return 2
+
+    def _play_audio_event(self, event_name: str, fallback: str | None = None, volume_scale: float = 1.0) -> None:
+        audio = self.game.audio
+        if hasattr(audio, "play_event"):
+            audio.play_event(event_name, volume_scale=volume_scale)
+            return
+        if fallback is not None:
+            audio.play_sfx(fallback, volume=volume_scale)
+
+    def _play_weapon_fire_audio(self, shooter, projectile_count: int) -> None:
+        if projectile_count <= 0:
+            return
+        weapon_id = getattr(getattr(shooter, "active_weapon", None), "spec", None)
+        identifier = getattr(weapon_id, "identifier", "")
+        event_name = f"weapon_fire_{identifier}" if identifier else "weapon_fire"
+        self._play_audio_event(event_name, "weapon_fire", 0.92 if shooter is self.player else 0.62)
+
+    def _play_hit_audio(self, victim) -> None:
+        if victim is None:
+            self._play_audio_event("bullet_impact", "mechanism", 0.68)
+            return
+        if victim is self.player:
+            self._play_audio_event("player_hurt", "danger")
+        elif getattr(victim, "is_treasure_boss", False) or getattr(victim, "is_elite", False):
+            self._play_audio_event("boss_hurt", "body_hit")
+        else:
+            self._play_audio_event("enemy_hurt", "body_hit")
+
+    def _play_defeat_audio(self, victim) -> None:
+        if victim is self.player:
+            self._play_audio_event("player_down", "danger")
+        elif getattr(victim, "is_treasure_boss", False) or getattr(victim, "is_elite", False):
+            self._play_audio_event("boss_defeated", "killfeed")
+        else:
+            self._play_audio_event("enemy_down", "killfeed")
+
+    def _update_dynamic_music(self) -> None:
+        if self.alive_treasure_guard_boss_count() > 0 and any(bot.alive and bot.alerted for bot in self.treasure_guard_bosses):
+            next_state = "boss"
+        elif self.alerted_bot_count() > 0 or self.searching_bot_count() > 0:
+            next_state = "combat"
+        else:
+            next_state = "battle"
+        if next_state != self._music_state:
+            self._music_state = next_state
+            self.game.audio.play_music(next_state, fade_ms=800)
 
     def alerted_bot_count(self) -> int:
         return sum(1 for bot in self.bots if bot.alive and bot.alerted)
@@ -246,70 +304,81 @@ class MatchManager:
         alerted = self.alerted_bot_count()
         searching = self.searching_bot_count()
         if alerted > 0 and searching > 0:
-            return f"局部警戒：{alerted} 名追击，{searching} 名搜索"
+            return f"Local alert: {alerted} chasing, {searching} searching"
         if alerted > 0:
-            return f"局部警戒：{alerted} 名守卫正在追击"
+            return f"Local alert: {alerted} enemies chasing"
         if searching > 0:
-            return f"局部警戒：{searching} 名守卫正在搜索声源"
-        return "局部警戒：未触发，远处守卫不会联动"
+            return f"Local alert: {searching} enemies searching"
+        return "Local alert: idle"
 
     def mission_guidance_text(self) -> str:
         if not self.player.combat_enabled:
-            return "当前步骤：先拾取武装模块或枪械，否则无法有效反击。"
-        if self.config.mode == "寻宝模式":
+            return "Step: pick up a weapon first."
+        if self.config.mode == "\u5bfb\u5b9d\u6a21\u5f0f":
             remaining = max(0, self.treasure_map_target - self.treasure_maps_found)
+            bosses_remaining = self.alive_treasure_guard_boss_count()
+            if bosses_remaining > 0:
+                return f"Step: defeat {bosses_remaining} treasure guards before collecting maps."
             if remaining == 0:
-                return "当前步骤：目标已完成，脱离交火区并等待结算。"
+                return "Step: mission complete, survive until extraction."
             if self.player_has_agro:
-                return f"当前步骤：先甩开附近警戒，再继续搜图。还差 {remaining} 张。"
-            return f"当前步骤：继续搜索藏宝图，还差 {remaining} 张。交火只会惊动附近守卫。"
-        if self.config.mode == "生存模式":
+                return f"Step: stabilize the fight, then collect {remaining} more maps."
+            return f"Step: collect {remaining} more treasure maps."
+        if self.config.mode == "\u751f\u5b58\u6a21\u5f0f":
             if self.player_has_agro:
-                return "当前步骤：保持机动，切断视线后再寻找下一个交战点。"
-            return "当前步骤：控制枪声暴露范围，逐个清理周边敌人。"
+                return "Step: break line of sight, then reposition."
+            return "Step: control noise and clear nearby enemies."
         remaining = max(0, self.config.kill_target - self.player.kills)
         if self.player_has_agro:
-            return f"当前步骤：局部警戒已触发，稳住枪线完成剩余 {remaining} 次击倒。"
-        return f"当前步骤：继续寻找目标，完成剩余 {remaining} 次击倒。"
+            return f"Step: finish {remaining} more eliminations under alert."
+        return f"Step: find targets and finish {remaining} eliminations."
 
     def mission_objective_text(self) -> str:
-        if self.config.mode == "寻宝模式":
-            return f"任务目标：搜集 {self.treasure_map_target} 张藏宝图"
-        if self.config.mode == "生存模式":
-            return "任务目标：坚持到场上只剩你一人"
-        return f"任务目标：完成 {self.config.kill_target} 次击倒"
+        if self.config.mode == "\u5bfb\u5b9d\u6a21\u5f0f":
+            return f"Objective: defeat 2 treasure guards, then collect {self.treasure_map_target} maps"
+        if self.config.mode == "\u751f\u5b58\u6a21\u5f0f":
+            return "Objective: be the last survivor"
+        return f"Objective: score {self.config.kill_target} eliminations"
 
     def mission_progress_text(self) -> str:
-        if self.config.mode == "寻宝模式":
-            remaining = max(0, self.treasure_map_target - self.treasure_maps_found)
-            if remaining == 0:
-                return f"任务进度：{self.treasure_maps_found}/{self.treasure_map_target}，已满足完成条件"
-            return f"任务进度：{self.treasure_maps_found}/{self.treasure_map_target}，还差 {remaining} 张"
-        if self.config.mode == "生存模式":
-            return f"任务进度：场上剩余 {self.alive_count()} 名作战单位"
+        if self.config.mode == "\u5bfb\u5b9d\u6a21\u5f0f":
+            bosses_down = 2 - self.alive_treasure_guard_boss_count()
+            return f"Treasure guards: {bosses_down}/2    Maps: {self.treasure_maps_found}/{self.treasure_map_target}"
+        if self.config.mode == "\u751f\u5b58\u6a21\u5f0f":
+            return f"Progress: {self.alive_count()} combatants alive"
         remaining = max(0, self.config.kill_target - self.player.kills)
-        return f"任务进度：{self.player.kills}/{self.config.kill_target}，还差 {remaining} 次"
+        return f"Progress: {self.player.kills}/{self.config.kill_target}, {remaining} remaining"
 
-    def _finish_reason(self, victory: bool) -> str:
-        if self.config.mode == "寻宝模式":
+    def _finish_reason(self, victory: bool, finish_type: str | None = None) -> str:
+        if finish_type == "last_survivor":
+            return "Battlefield cleared. Teleporting to the next map."
+        if finish_type == "treasure_complete":
+            return "All treasure maps collected. Teleporting to the next map."
+        if finish_type == "kill_target":
+            return "Elimination target reached. Teleporting to the next map."
+        if finish_type == "death":
+            return "Player eliminated before extraction."
+        if finish_type == "timeout":
+            return "Time expired before extraction."
+        if self.config.mode == "\u5bfb\u5b9d\u6a21\u5f0f":
             if victory:
-                return "已集齐全部藏宝图，任务完成。"
+                return "All treasure maps collected. Mission complete."
             if not self.player.alive:
-                return "行动员被击倒，藏宝任务中止。"
+                return "Player eliminated before completing the treasure mission."
             if self.elapsed >= self.config.match_time_limit:
-                return f"时间耗尽，仅拿到 {self.treasure_maps_found}/{self.treasure_map_target} 张藏宝图。"
-            return f"任务未完成，当前进度为 {self.treasure_maps_found}/{self.treasure_map_target}。"
-        if self.config.mode == "生存模式":
+                return f"Time expired with {self.treasure_maps_found}/{self.treasure_map_target} maps."
+            return f"Mission incomplete: {self.treasure_maps_found}/{self.treasure_map_target} maps."
+        if self.config.mode == "\u751f\u5b58\u6a21\u5f0f":
             if victory:
-                return "你是场上最后存活的作战单位。"
+                return "You are the last survivor."
             if not self.player.alive:
-                return "你在缩圈结束前被淘汰。"
-            return "时间结束时未能清空战场。"
+                return "You were eliminated before the final circle."
+            return "Time expired before the battlefield was cleared."
         if victory:
-            return "已达到本局击倒目标。"
+            return "Elimination target reached."
         if not self.player.alive:
-            return "达成击倒目标前已被淘汰。"
-        return f"时间耗尽，击倒数停留在 {self.player.kills}/{self.config.kill_target}。"
+            return "Player eliminated before reaching the kill target."
+        return f"Time expired at {self.player.kills}/{self.config.kill_target} eliminations."
 
     def _refresh_alert_state(self) -> int:
         alerted = self.alerted_bot_count()
@@ -319,14 +388,29 @@ class MatchManager:
         self.peak_alerted_bots = max(self.peak_alerted_bots, alerted)
         self.peak_local_alert_bots = max(self.peak_local_alert_bots, local_alert_total)
         if self.last_local_alert_count > 0 and local_alert_total == 0:
-            self.announcements.append(Banner("附近守卫失去目标，局部警戒解除。", (170, 236, 255), ttl=1.8))
+            self.announcements.append(Banner("Nearby enemies lost the target.", (170, 236, 255), ttl=1.8))
         self.last_local_alert_count = local_alert_total
         return alerted
 
-    def _register_sprite(self, sprite, group: pygame.sprite.Group | None = None) -> None:
+    def _register_sprite(self, sprite: pygame.sprite.Sprite, group: pygame.sprite.Group | None = None) -> None:
         self.render_group.add(sprite, layer=getattr(sprite, "_layer", 0))
         if hasattr(sprite, "sync_visual"):
-            sprite.sync_visual(Vector2())
+            class _InitCamera:
+                position = Vector2()
+
+                @staticmethod
+                def world_to_screen(position: Vector2) -> tuple[int, int]:
+                    return int(position.x), int(position.y)
+
+                @staticmethod
+                def project_vertical_distance(distance: float) -> int:
+                    return int(distance)
+
+                @staticmethod
+                def world_rect_to_screen_bounds(rect: pygame.Rect) -> pygame.Rect:
+                    return rect.copy()
+
+            sprite.sync_visual(_InitCamera())
         if group is not None:
             group.add(sprite)
 
@@ -354,11 +438,32 @@ class MatchManager:
         return surfaces, row_orders
 
     def _build_spawn_positions(self, count: int) -> list[Vector2]:
-        candidates = [self._sanitize_spawn_point(point.copy()) for point in self.game_map.spawn_points]
         dynamic_spacing = min(SPAWN_MIN_SEPARATION, min(self.game_map.bounds.width, self.game_map.bounds.height) * 0.24)
         selected: list[Vector2] = []
 
-        for candidate in candidates:
+        player_candidates = [
+            self._sanitize_spawn_point(point.copy())
+            for point in getattr(self.game_map, "player_spawn_points", [])
+        ]
+        enemy_candidates = [
+            self._sanitize_spawn_point(point.copy())
+            for point in getattr(self.game_map, "enemy_spawn_points", [])
+        ]
+
+        if not player_candidates:
+            player_candidates = [self.game_map.random_safe_point(self.rng, margin=120)]
+        if not enemy_candidates:
+            enemy_candidates = [
+                self._sanitize_spawn_point(point.copy())
+                for point in getattr(self.game_map, "spawn_points", [])
+            ]
+
+        world_center = Vector2(self.game_map.bounds.center)
+        player_spawn = min(player_candidates, key=lambda point: point.distance_to(world_center))
+        selected.append(player_spawn.copy())
+
+        enemy_candidates.sort(key=lambda point: point.distance_to(player_spawn), reverse=True)
+        for candidate in enemy_candidates:
             if len(selected) >= count:
                 break
             if all(candidate.distance_to(existing) >= dynamic_spacing * 0.55 for existing in selected):
@@ -379,7 +484,7 @@ class MatchManager:
         return selected
 
     def _sanitize_spawn_point(self, point: Vector2) -> Vector2:
-        if not self.game_map.blocks_circle(point, self.player_profile_radius()):
+        if self.game_map.is_walkable_point(point, clearance=self.player_profile_radius()):
             return point
         best_candidate: Vector2 | None = None
         best_distance = float("inf")
@@ -389,7 +494,7 @@ class MatchManager:
                 candidate = point + Vector2(math.cos(angle), math.sin(angle)) * radius
                 if not self.game_map.bounds.collidepoint(candidate):
                     continue
-                if self.game_map.blocks_circle(candidate, self.player_profile_radius()):
+                if not self.game_map.is_walkable_point(candidate, clearance=self.player_profile_radius()):
                     continue
                 distance = point.distance_to(candidate)
                 if distance < best_distance:
@@ -401,7 +506,42 @@ class MatchManager:
 
     @staticmethod
     def player_profile_radius() -> float:
-        return 22.0
+        return 26.0
+
+    def _resolve_walkable_position(
+        self,
+        desired: Vector2,
+        *,
+        clearance: float = 30.0,
+        occupied: list[Vector2] | None = None,
+        min_distance: float = 0.0,
+        search_limit: float = 220.0,
+    ) -> Vector2:
+        if occupied is None:
+            occupied = []
+        candidate = self.game_map.find_nearest_walkable_point(desired, clearance=clearance, search_limit=search_limit)
+        if candidate is not None and all(candidate.distance_to(other) >= min_distance for other in occupied):
+            return candidate
+
+        angles = [index * (math.tau / 16.0) for index in range(16)]
+        for radius in (28.0, 52.0, 84.0, 120.0, 168.0, search_limit):
+            for angle in angles:
+                shifted = desired + Vector2(math.cos(angle), math.sin(angle)) * radius
+                candidate = self.game_map.find_nearest_walkable_point(shifted, clearance=clearance, search_limit=96.0)
+                if candidate is None:
+                    continue
+                if any(candidate.distance_to(other) < min_distance for other in occupied):
+                    continue
+                return candidate
+
+        fallback_candidates = [
+            point.copy()
+            for point in self.game_map.walkable_points
+            if all(point.distance_to(other) >= min_distance for other in occupied)
+        ]
+        if fallback_candidates:
+            return min(fallback_candidates, key=lambda point: point.distance_to(desired))
+        return self.game_map.random_safe_point(self.rng, margin=max(72, int(clearance + 28)))
 
     def _build_startup_gear_position(self, spawn: Vector2, occupied: list[Vector2]) -> Vector2:
         angles = [index * (math.tau / 12.0) for index in range(12)]
@@ -415,7 +555,7 @@ class MatchManager:
                 candidate = spawn + Vector2(math.cos(angle), math.sin(angle)) * radius
                 if not self.game_map.bounds.collidepoint(candidate):
                     continue
-                if self.game_map.blocks_circle(candidate, 24.0):
+                if not self.game_map.is_walkable_point(candidate, clearance=28.0):
                     continue
                 if any(candidate.distance_to(other) < 72.0 for other in occupied):
                     continue
@@ -433,6 +573,13 @@ class MatchManager:
 
     def _spawn_player(self) -> Player:
         spawn = self.spawn_positions[0].copy()
+        resolved_spawn = self.game_map.find_nearest_walkable_point(
+            spawn,
+            clearance=self.player_profile_radius(),
+            search_limit=self.game_map.cell_size * 8,
+        )
+        if resolved_spawn is not None:
+            spawn = resolved_spawn
         player = Player(spawn, self.game.player_profile)
         hero_anim_bundle = self._load_character_animation_bundle("hero")
         hero_dir8_path = RESOURCE_ROOT / "img" / "characters" / "hero_dir8_sheet.png"
@@ -501,7 +648,7 @@ class MatchManager:
             role = "elite" if is_elite else "standard"
             spawn = self.spawn_positions[index + 1]
             spec = WEAPON_LIBRARY[self.rng.choice(elite_pool if is_elite else normal_pool)]
-            name = f"精英·{names[index]}" if is_elite else names[index]
+            name = f"Elite Guard {names[index]}" if is_elite else names[index]
             bot = BotPlayer(name, spawn.copy(), spec, self.rng, role=role)
             anim_bundle = elite_anim_bundle if is_elite else standard_anim_bundle
             dir8_path = elite_dir8_path if is_elite else standard_dir8_path
@@ -534,7 +681,22 @@ class MatchManager:
             bots.append(bot)
         return bots
 
-    def _add_pickup(self, pickup: Pickup) -> None:
+    def _add_pickup(
+        self,
+        pickup: Pickup,
+        *,
+        occupied: list[Vector2] | None = None,
+        min_distance: float = 0.0,
+        clearance: float = 28.0,
+    ) -> None:
+        pickup.position = self._resolve_walkable_position(
+            pickup.position,
+            clearance=clearance,
+            occupied=occupied,
+            min_distance=min_distance,
+        )
+        if occupied is not None:
+            occupied.append(pickup.position.copy())
         self.pickups.append(pickup)
         self._register_sprite(pickup, self.pickup_group)
 
@@ -543,8 +705,15 @@ class MatchManager:
         points = self.game_map.loot_points[:]
         self.rng.shuffle(points)
         treasure_points = self._select_treasure_map_positions(points)
+        self.treasure_sites = [point.copy() for point in treasure_points]
+        occupied: list[Vector2] = []
         for point in treasure_points:
-            self._add_pickup(Pickup(kind="treasure_map", position=point.copy()))
+            self._add_pickup(
+                Pickup(kind="treasure_map", position=point.copy()),
+                occupied=occupied,
+                min_distance=72.0,
+                clearance=30.0,
+            )
 
         remaining_points = [point for point in points if all(point.distance_to(treasure) > 1.0 for treasure in treasure_points)]
         for index, point in enumerate(remaining_points[: max(30, min(48, len(remaining_points)))]):
@@ -558,7 +727,62 @@ class MatchManager:
                 pickup = Pickup(kind="ammo", position=point.copy(), ammo_type=ammo_type, amount=amount)
             else:
                 pickup = Pickup(kind="medkit", position=point.copy(), amount=1)
-            self._add_pickup(pickup)
+            self._add_pickup(pickup, occupied=occupied, min_distance=56.0, clearance=28.0)
+
+    def _treasure_site_key(self, position: Vector2) -> str:
+        return f"{int(position.x)}:{int(position.y)}"
+
+    def _guard_label_for_position(self, position: Vector2) -> str:
+        nearest = self.game_map.nearest_landmark_name(position)
+        return nearest if nearest else self.theme.label
+
+    def _assign_guard_roles(self) -> None:
+        self.treasure_guard_bosses = []
+        boss_anchors = self.treasure_sites[:] or [self.safe_zone.current_center.copy()]
+        boss_candidates = [bot for bot in self.bots if bot.is_elite]
+        if len(boss_candidates) < 2:
+            boss_candidates.extend(bot for bot in self.bots if bot not in boss_candidates)
+        selected_bosses = boss_candidates[:2]
+
+        for index, boss in enumerate(selected_bosses):
+            anchor = boss_anchors[index % len(boss_anchors)].copy()
+            boss.is_treasure_boss = True
+            boss.treasure_guard = True
+            boss.patrol_entire_map = False
+            boss.name = f"Treasure Guard {index + 1}"
+            boss.color = (86, 52, 46)
+            boss.accent_color = (255, 162, 92)
+            boss.marker_color = (255, 222, 164)
+            boss.secondary_color = (34, 24, 22)
+            boss.visual_scale_multiplier = 1.16
+            boss.sprite_tint = (54, 22, 0)
+            boss.sprite_tint_strength = 26
+            boss.set_guard_anchor(anchor, radius=210.0, label=f"Treasure Guard {index + 1}", treasure_guard=True)
+            boss.wander_target = anchor.copy()
+            self.treasure_guard_bosses.append(boss)
+
+        patrol_points = self.game_map.walkable_points or self.game_map.spawn_points
+        full_map_radius = math.hypot(self.game_map.bounds.width, self.game_map.bounds.height)
+        for index, bot in enumerate(self.bots):
+            if bot in self.treasure_guard_bosses:
+                continue
+            bot.is_treasure_boss = False
+            bot.treasure_guard = False
+            bot.patrol_entire_map = True
+            bot.visual_scale_multiplier = 1.0
+            bot.sprite_tint = None
+            bot.sprite_tint_strength = 0
+            anchor = patrol_points[index % len(patrol_points)].copy() if patrol_points else self.safe_zone.current_center.copy()
+            bot.set_guard_anchor(
+                anchor,
+                radius=full_map_radius,
+                label="full_map_patrol",
+                treasure_guard=False,
+            )
+            bot.wander_target = self.safe_zone.random_patrol_point(self.rng, self.game_map)
+
+    def alive_treasure_guard_boss_count(self) -> int:
+        return sum(1 for bot in self.treasure_guard_bosses if bot.alive)
 
     def _treasure_spawn_clearance(self) -> float:
         shortest_edge = float(min(self.game_map.bounds.width, self.game_map.bounds.height))
@@ -659,34 +883,97 @@ class MatchManager:
         self._refresh_alert_state()
         return alerted, searching
 
+    def _alert_treasure_guardians(
+        self,
+        source_position: Vector2,
+        *,
+        duration: float,
+        aggressive: bool,
+    ) -> tuple[int, int]:
+        if self.alive_treasure_guard_boss_count() <= 0:
+            return 0, 0
+        alerted = 0
+        searching = 0
+        for bot in self.treasure_guard_bosses:
+            if not bot.alive:
+                continue
+            if not aggressive and bot.guard_anchor.distance_to(source_position) > bot.guard_radius * 1.15:
+                continue
+            if aggressive or bot.position.distance_to(source_position) <= bot.guard_radius * 0.72:
+                if not bot.alerted:
+                    alerted += 1
+                bot.set_alerted(duration, source_position, investigation_time=max(4.2, duration * 0.9))
+            else:
+                was_tracking = bot.alerted or bot.searching
+                bot.set_searching(max(5.0, duration * 0.72), source_position, investigation_time=max(4.0, duration))
+                if not was_tracking:
+                    searching += 1
+        self._refresh_alert_state()
+        if alerted > 0:
+            self._play_audio_event("boss_alert", "danger")
+        return alerted, searching
+
+    def _update_treasure_contest(self) -> None:
+        if self.alive_treasure_guard_boss_count() <= 0:
+            self.contested_treasure_sites.clear()
+            return
+        for pickup in self.pickups:
+            if pickup.kind != "treasure_map":
+                continue
+            key = self._treasure_site_key(pickup.position)
+            distance = self.player.position.distance_to(pickup.position)
+            if distance <= 150.0:
+                if key not in self.contested_treasure_sites:
+                    self.contested_treasure_sites.add(key)
+                    alerted, searching = self._alert_treasure_guardians(pickup.position, duration=16.0, aggressive=True)
+                    if alerted > 0 or searching > 0:
+                        self.announcements.append(Banner("Treasure area entered. Treasure guards are engaging.", (255, 208, 150), ttl=2.0))
+            elif distance >= 210.0:
+                self.contested_treasure_sites.discard(key)
+
+    def _reward_player_energy(self, amount: int, source_position: Vector2 | None = None) -> int:
+        gained = self.player.gain_energy(amount)
+        if gained > 0:
+            self.player_energy_gained += gained
+            if source_position is not None:
+                self.particles.add_damage_number(source_position.copy(), gained, (112, 222, 255))
+            if self.player.energy == self.player.max_energy:
+                self.announcements.append(Banner("Energy fully charged.", (112, 222, 255), ttl=1.8))
+        return gained
+
     def _announce_local_alert(self, source_label: str, alerted: int, searching: int) -> None:
         if alerted <= 0 and searching <= 0:
             return
         if alerted > 0 and searching > 0:
-            text = f"{source_label}触发局部警戒：{alerted} 名守卫追击，{searching} 名守卫搜索。"
+            text = f"{source_label} alert: {alerted} chasing, {searching} searching"
         elif alerted > 0:
-            text = f"{source_label}触发局部警戒：{alerted} 名守卫正在追击。"
+            text = f"{source_label} alert: {alerted} chasing"
         else:
-            text = f"{source_label}惊动附近守卫，{searching} 名敌人开始搜索声源。"
+            text = f"{source_label} alert: {searching} searching"
         self.announcements.append(Banner(text, (255, 168, 148), ttl=2.1))
 
     def handle_zone_events(self, events: list[tuple[str, int]]) -> None:
         for kind, phase_number in events:
             if kind == "shrink_start":
-                self.announcements.append(Banner(f"毒圈开始收缩，第 {phase_number} 阶段。", ZONE_BLUE))
+                self.announcements.append(Banner(f"Zone shrink started: phase {phase_number}.", ZONE_BLUE))
                 if phase_number in (2, 4):
                     self.spawn_supply_drop()
             elif kind == "phase_locked":
-                self.announcements.append(Banner("安全区已锁定，下一阶段即将开始。", UI_ACCENT))
+                self.announcements.append(Banner("Safe zone locked. Next phase is starting soon.", UI_ACCENT))
             elif kind == "final":
-                self.announcements.append(Banner("最终决赛圈已形成，掩体空间极少。", ZONE_DANGER, ttl=4.5))
+                self.announcements.append(Banner("Final circle formed.", ZONE_DANGER, ttl=4.5))
 
     def spawn_supply_drop(self, position: Vector2 | None = None) -> None:
         drop_pos = position.copy() if position is not None else self.safe_zone.random_patrol_point(self.rng, self.game_map)
         if position is None:
-            self.announcements.append(Banner("空投已落在安全区内。", (247, 213, 116)))
+            self.announcements.append(Banner("Supply drop inbound.", (247, 213, 116)))
         supply_weapon = self.rng.choice((WEAPON_LIBRARY["carbine"], WEAPON_LIBRARY["dmr"], WEAPON_LIBRARY["shotgun"]))
-        self._add_pickup(Pickup(kind="weapon", position=drop_pos.copy(), weapon_spec=supply_weapon, is_supply=True))
+        occupied: list[Vector2] = []
+        self._add_pickup(
+            Pickup(kind="weapon", position=drop_pos.copy(), weapon_spec=supply_weapon, is_supply=True),
+            occupied=occupied,
+            clearance=32.0,
+        )
         self._add_pickup(
             Pickup(
                 kind="ammo",
@@ -694,9 +981,17 @@ class MatchManager:
                 ammo_type=supply_weapon.ammo_type,
                 amount=supply_weapon.pickup_ammo_bonus + 24,
                 is_supply=True,
-            )
+            ),
+            occupied=occupied,
+            min_distance=48.0,
+            clearance=28.0,
         )
-        self._add_pickup(Pickup(kind="medkit", position=drop_pos + Vector2(-28, 12), amount=1, is_supply=True))
+        self._add_pickup(
+            Pickup(kind="medkit", position=drop_pos + Vector2(-28, 12), amount=1, is_supply=True),
+            occupied=occupied,
+            min_distance=48.0,
+            clearance=28.0,
+        )
 
     def nearest_pickup_for_player(self) -> Pickup | None:
         nearest = None
@@ -712,18 +1007,23 @@ class MatchManager:
         if pickup not in self.pickups:
             return None
         was_armed = character.combat_enabled
+        pickup_position = pickup.position.copy()
         if pickup.kind == "gear":
             if not character.arm_combat():
                 return None
         elif pickup.kind == "treasure_map":
             if character is not self.player:
                 return None
-            if character is self.player:
-                self.treasure_maps_found = min(self.treasure_map_target, self.treasure_maps_found + 1)
+            remaining_bosses = self.alive_treasure_guard_boss_count()
+            if remaining_bosses > 0:
+                self._play_audio_event("map_locked", "danger")
+                self.announcements.append(Banner(f"Defeat {remaining_bosses} treasure guards before collecting maps.", (255, 196, 132), ttl=1.8))
+                return None
+            self.treasure_maps_found = min(self.treasure_map_target, self.treasure_maps_found + 1)
         elif pickup.kind == "medkit":
             if character.medkits >= MAX_MEDKITS:
                 return None
-            character.medkits += pickup.amount
+            character.medkits = min(MAX_MEDKITS, character.medkits + pickup.amount)
         elif pickup.kind == "ammo":
             if pickup.ammo_type:
                 character.ammo[pickup.ammo_type] = character.ammo.get(pickup.ammo_type, 0) + pickup.amount
@@ -734,18 +1034,28 @@ class MatchManager:
             if dropped is not None:
                 offset = Vector2(self.rng.randint(-22, 22), self.rng.randint(-22, 22))
                 self._add_pickup(Pickup(kind="weapon", position=pickup.position + offset, weapon_spec=dropped))
+        else:
+            return None
         pickup.kill()
         self.pickups.remove(pickup)
-        if character is self.player and pickup.kind == "weapon" and not was_armed and character.combat_enabled:
-            self.announcements.append(Banner(f"已装备 {pickup.weapon_spec.label}，可以进行战斗。", (170, 236, 255), ttl=1.8))
-        if False and character is self.player and pickup.kind == "treasure_map":
-            self.announcements.append(Banner(f"找到藏宝图 {self.treasure_maps_found}/{self.treasure_map_target}。", (247, 220, 148), ttl=1.8))
+        if character is self.player:
+            pickup_event = {
+                "weapon": "pickup_weapon",
+                "ammo": "pickup_ammo",
+                "medkit": "pickup_medkit",
+                "treasure_map": "map_pickup",
+                "gear": "pickup_weapon",
+            }.get(pickup.kind, "pickup_item")
+            self._play_audio_event(pickup_event, "reload_complete")
+        if character is self.player and pickup.kind == "weapon" and not was_armed and character.combat_enabled and pickup.weapon_spec:
+            self.announcements.append(Banner(f"Equipped {pickup.weapon_spec.label}. Combat enabled.", (170, 236, 255), ttl=1.8))
         if character is self.player and pickup.kind == "treasure_map":
+            self.contested_treasure_sites.discard(self._treasure_site_key(pickup_position))
             remaining = max(0, self.treasure_map_target - self.treasure_maps_found)
             if remaining > 0:
-                message = f"找到藏宝图 {self.treasure_maps_found}/{self.treasure_map_target}，再拿 {remaining} 张即可完成任务。"
+                message = f"Treasure maps: {self.treasure_maps_found}/{self.treasure_map_target}. {remaining} remaining."
             else:
-                message = "找到最后一张藏宝图，任务目标已完成。"
+                message = "Final treasure map collected. Mission objective complete."
             self.announcements.append(Banner(message, (247, 220, 148), ttl=2.0))
         return pickup.kind
 
@@ -754,7 +1064,7 @@ class MatchManager:
         if nearest is not None:
             pickup_kind = self.consume_pickup(self.player, nearest)
             if pickup_kind == "medkit":
-                self.announcements.append(Banner("医疗箱已收纳，可在受伤后使用。", (144, 230, 188), ttl=1.4))
+                self.announcements.append(Banner("Medkit acquired.", (144, 230, 188), ttl=1.4))
 
     def player_throw_grenade(self, target_world: Vector2) -> bool:
         if not self.player.can_throw_grenade():
@@ -779,6 +1089,11 @@ class MatchManager:
         return True
 
     def _register_new_projectiles(self, new_projectiles) -> None:
+        if not new_projectiles:
+            return
+        owner = getattr(new_projectiles[0], "owner", None)
+        if owner is not None:
+            self._play_weapon_fire_audio(owner, len(new_projectiles))
         self.projectiles.extend(new_projectiles)
         for projectile in new_projectiles:
             self._register_sprite(projectile, self.projectile_group)
@@ -818,7 +1133,11 @@ class MatchManager:
                     post_player_enter_trigger(trigger.label, trigger.kind)
                 if timer >= 0.55:
                     self.trigger_timers[trigger.label] = 0.0
-                    self.player.take_damage(2, None)
+                    died = self.player.take_damage(2, None)
+                    if died:
+                        self._play_defeat_audio(self.player)
+                    else:
+                        self._play_audio_event("player_hurt", "danger", 0.62)
                     post_camera_shake(2.4, 0.08)
                 continue
 
@@ -858,7 +1177,7 @@ class MatchManager:
         self.player.armor = min(self.player.max_armor, self.player.armor + 12)
         return "supply"
 
-    def update(self, dt: float, keys, mouse_world: Vector2, firing: bool) -> None:
+    def update(self, dt: float, keys, mouse_world: Vector2, firing: bool, movement_held_keys: set[int] | None = None) -> None:
         self.elapsed += dt
         self.controls_hint_timer = max(0.0, self.controls_hint_timer - dt)
         if self.controls_hint_timer == 0.0 and self.controls_visible:
@@ -873,7 +1192,19 @@ class MatchManager:
 
         if self.countdown > 0.0:
             self.countdown = max(0.0, self.countdown - dt)
+            self._register_new_projectiles(
+                self.player.update(
+                    dt=dt,
+                    game_map=self.game_map,
+                    keys=keys,
+                    mouse_world=mouse_world,
+                    firing=False,
+                    rng=self.rng,
+                    held_keys=movement_held_keys,
+                )
+            )
             self._update_banners(dt)
+            self.particles.update(dt)
             return
 
         zone_events = self.safe_zone.update(dt, self.game_map)
@@ -887,8 +1218,11 @@ class MatchManager:
                 mouse_world=mouse_world,
                 firing=firing,
                 rng=self.rng,
+                held_keys=movement_held_keys,
             )
         )
+        self._update_treasure_contest()
+
         for bot in self.bots:
             if bot.alive:
                 self._register_new_projectiles(
@@ -913,27 +1247,31 @@ class MatchManager:
             self.characters,
         )
         for event in hit_events:
+            self._play_hit_audio(event.victim)
             self.particles.add_impact(event.impact_position, event.color)
             for position, damage in event.damage_numbers:
                 self.particles.add_damage_number(position, damage, (255, 218, 190))
-            if False and event.owner is self.player and event.victim in self.bots:
-                alerted = self._alert_bots_around(event.victim.position, radius=520.0, duration=18.0)
-                self.announcements.append(Banner("你已惊动守卫，敌人开始反击。", (255, 168, 148), ttl=2.0))
             if event.owner is self.player and event.victim in self.bots:
-                alerted, searching = self._alert_bots_around(event.impact_position, radius=LOCAL_ALERT_SHOT_RADIUS, duration=14.0)
-                self._announce_local_alert("枪声", alerted, searching)
-                if False and alerted > 0:
-                    self.announcements.append(Banner(f"枪声惊动附近 {alerted} 名守卫，局部警戒生效。", (255, 168, 148), ttl=2.0))
+                event.victim.set_alerted(
+                    20.0 if getattr(event.victim, "is_elite", False) else 14.0,
+                    self.player.position,
+                    investigation_time=12.0,
+                )
+                if getattr(event.victim, "is_elite", False):
+                    self._reward_player_energy(8, event.victim.position + Vector2(0, -18))
             if event.victim is self.player:
                 post_camera_shake(5.0, 0.12)
             if event.victim is not None and not event.victim.alive and event.owner is not event.victim:
-                post_killfeed(f"{event.owner.name} 淘汰了 {event.victim.name}", event.owner.color)
+                self._play_defeat_audio(event.victim)
+                owner_name = getattr(event.owner, "name", "Unknown")
+                post_killfeed(f"{owner_name} eliminated {event.victim.name}", getattr(event.owner, "color", UI_ACCENT))
                 if event.owner is self.player:
                     if getattr(event.victim, "is_elite", False):
-                        self.announcements.append(Banner(f"你击倒了精英单位 {event.victim.name}。", (255, 148, 148), ttl=1.8))
+                        self._reward_player_energy(20, event.victim.position + Vector2(0, -28))
+                        self.announcements.append(Banner(f"Elite unit {event.victim.name} eliminated.", (255, 148, 148), ttl=1.8))
                         self.spawn_supply_drop(event.victim.position)
                     else:
-                        self.announcements.append(Banner("命中致命一击。", event.owner.color, ttl=1.4))
+                        self.announcements.append(Banner("Target eliminated.", event.owner.color, ttl=1.4))
         self._cleanup_projectile_group()
 
         self.grenades, explosion_events = self.collision_manager.update_grenades(
@@ -943,31 +1281,36 @@ class MatchManager:
             self.characters,
         )
         for event in explosion_events:
+            self._play_audio_event("grenade_blast", "grenade_blast")
             self.particles.add_explosion(event.impact_position, event.color, event.radius)
             post_camera_shake(10.0, 0.22)
             for position, damage in event.damage_numbers:
                 self.particles.add_damage_number(position, damage, (255, 208, 168))
-            if False and event.owner is self.player and any(victim in self.bots for victim in event.victims) and not self.player_has_agro:
-                self.player_has_agro = True
-                self.announcements.append(Banner("爆炸惊动了守卫，敌人开始反击。", (255, 168, 148), ttl=2.0))
-            if event.owner is self.player:
-                alerted, searching = self._alert_bots_around(event.impact_position, radius=LOCAL_ALERT_GRENADE_RADIUS, duration=18.0)
-                self._announce_local_alert("爆炸", alerted, searching)
-                if False and alerted > 0:
-                    self.announcements.append(Banner(f"爆炸惊动附近 {alerted} 名守卫，局部警戒扩大。", (255, 168, 148), ttl=2.0))
             for victim in event.victims:
+                if event.owner is self.player and victim in self.bots:
+                    victim.set_alerted(
+                        20.0 if getattr(victim, "is_elite", False) else 14.0,
+                        self.player.position,
+                        investigation_time=12.0,
+                    )
+                    if getattr(victim, "is_elite", False):
+                        self._reward_player_energy(10, victim.position + Vector2(0, -20))
                 if not victim.alive and event.owner is not None and event.owner is not victim:
-                    post_killfeed(f"{event.owner.name} 爆破淘汰了 {victim.name}", event.owner.color)
+                    self._play_defeat_audio(victim)
+                    post_killfeed(f"{event.owner.name} eliminated {victim.name} with an explosion", event.owner.color)
                     if event.owner is self.player and getattr(victim, "is_elite", False):
-                        self.announcements.append(Banner(f"精英单位 {victim.name} 被爆破清除。", (255, 148, 148), ttl=1.8))
+                        self._reward_player_energy(20, victim.position + Vector2(0, -30))
+                        self.announcements.append(Banner(f"Elite unit {victim.name} destroyed.", (255, 148, 148), ttl=1.8))
                         self.spawn_supply_drop(victim.position)
         self._cleanup_projectile_group()
 
         self._apply_zone_damage(dt)
+        self._update_dynamic_music()
         self._update_banners(dt)
+        self.particles.update(dt)
 
-        if not self.player.alive and self.respawn_charges > 0 and self.pending_respawn_timer is None:
-            self.pending_respawn_timer = max(2.5, self.config.respawn_time or 3.0)
+        if self.respawn_charges > 0 and not self.player.alive and self.pending_respawn_timer is None:
+            self.pending_respawn_timer = 2.2
             self.pending_respawn_anchor = self.pending_respawn_anchor or self.game_map.random_safe_point(self.rng)
 
         if self.is_finished() and not self.match_end_posted:
@@ -990,19 +1333,25 @@ class MatchManager:
         for character in self.characters:
             if character.alive and self.safe_zone.is_outside(character.position):
                 died = character.take_damage(damage, None)
+                if character is self.player:
+                    if died:
+                        self._play_defeat_audio(character)
+                    else:
+                        self._play_audio_event("player_hurt", "danger", 0.52)
                 if died:
-                    post_killfeed(f"{character.name} 倒在了毒圈外", ZONE_DANGER)
+                    post_killfeed(f"{character.name} was eliminated by the zone", ZONE_DANGER)
 
     def _update_banners(self, dt: float) -> None:
         self.announcements = [banner for banner in self.announcements if banner.update(dt)]
         self.killfeed = [banner for banner in self.killfeed if banner.update(dt)]
 
-    def sync_render_group(self, camera_position: Vector2) -> None:
+    def sync_render_group(self, camera) -> None:
         for sprite in self.render_group.sprites():
             if hasattr(sprite, "sync_visual"):
-                sprite.sync_visual(camera_position)
+                sprite.sync_visual(camera)
             if hasattr(sprite, "position"):
-                self.render_group.change_layer(sprite, getattr(sprite, "_layer", 0) * 10000 + int(sprite.position.y))
+                screen_y = camera.world_to_screen(sprite.position)[1]
+                self.render_group.change_layer(sprite, getattr(sprite, "_layer", 0) * 10000 + screen_y)
 
     def alive_count(self) -> int:
         return sum(1 for character in self.characters if character.alive)
@@ -1011,15 +1360,35 @@ class MatchManager:
         return sum(1 for bot in self.elite_bots if bot.alive)
 
     def is_finished(self) -> bool:
-        if self.elapsed >= self.config.match_time_limit:
-            return True
         if self.pending_respawn_timer is not None:
             return False
-        if self.config.mode == "寻宝模式":
-            return not self.player.alive or self.treasure_maps_found >= self.treasure_map_target
-        if self.config.mode == "生存模式":
-            return not self.player.alive or self.alive_count() == 1
+        if not self.player.alive:
+            return True
+        if self._player_is_last_survivor():
+            return True
+        if self.elapsed >= self.config.match_time_limit:
+            return True
+        if self.config.mode == "\u5bfb\u5b9d\u6a21\u5f0f":
+            return self.treasure_maps_found >= self.treasure_map_target
+        if self.config.mode == "\u751f\u5b58\u6a21\u5f0f":
+            return self.alive_count() == 1
         return self.player.kills >= self.config.kill_target
+
+    def _player_is_last_survivor(self) -> bool:
+        return self.player.alive and self.alive_count() == 1
+
+    def _finish_type(self) -> str:
+        if not self.player.alive:
+            return "death"
+        if self._player_is_last_survivor():
+            return "last_survivor"
+        if self.config.mode == "\u5bfb\u5b9d\u6a21\u5f0f" and self.treasure_maps_found >= self.treasure_map_target:
+            return "treasure_complete"
+        if self.config.mode != "\u5bfb\u5b9d\u6a21\u5f0f" and self.config.mode != "\u751f\u5b58\u6a21\u5f0f" and self.player.kills >= self.config.kill_target:
+            return "kill_target"
+        if self.elapsed >= self.config.match_time_limit:
+            return "timeout"
+        return "incomplete"
 
     def respawn_player(self, anchor: tuple[float, float] | None = None) -> None:
         position = Vector2(anchor) if anchor is not None else self.pending_respawn_anchor or self.game_map.random_safe_point(self.rng)
@@ -1029,12 +1398,15 @@ class MatchManager:
         self.pending_respawn_anchor = None
 
     def build_summary(self) -> dict[str, object]:
-        if self.config.mode == "寻宝模式":
-            victory = self.player.alive and self.treasure_maps_found >= self.treasure_map_target
-        else:
-            victory = self.player.alive and (self.alive_count() == 1 or self.player.kills >= self.config.kill_target)
+        finish_type = self._finish_type()
+        victory = finish_type in {"last_survivor", "treasure_complete", "kill_target"}
+        next_theme_id = get_next_theme_id(self.theme_id)
         return {
             "victory": victory,
+            "finish_type": finish_type,
+            "advance_to_next_map": victory,
+            "next_theme_id": next_theme_id,
+            "next_theme_label": THEME_BY_ID[next_theme_id].label,
             "callsign": self.player.name,
             "kills": self.player.kills,
             "damage": int(self.player.damage_dealt),
@@ -1042,11 +1414,13 @@ class MatchManager:
             "alive_count": self.alive_count(),
             "elite_alive_count": self.elite_alive_count(),
             "grenades_left": self.player.grenade_count,
+            "player_energy": self.player.energy,
+            "player_energy_gained": self.player_energy_gained,
             "treasure_maps_found": self.treasure_maps_found,
             "treasure_map_target": self.treasure_map_target,
             "objective_text": self.mission_objective_text(),
             "objective_progress_text": self.mission_progress_text(),
-            "finish_reason": self._finish_reason(victory),
+            "finish_reason": self._finish_reason(victory, finish_type),
             "peak_alerted_bots": self.peak_alerted_bots,
             "peak_local_alert_bots": self.peak_local_alert_bots,
             "bot_count": len(self.bots),

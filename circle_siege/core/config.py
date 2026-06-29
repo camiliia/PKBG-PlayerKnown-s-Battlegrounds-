@@ -11,6 +11,7 @@ TITLE = "圈地突围"
 WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 RESOURCE_ROOT = WORKSPACE_ROOT / "resource"
 TMX_ROOT = RESOURCE_ROOT / "tmx"
+GRID_MAP_ROOT = RESOURCE_ROOT / "grid_maps"
 
 WORLD_WIDTH = 2800
 WORLD_HEIGHT = 2400
@@ -30,7 +31,7 @@ TEXT_MUTED = (156, 168, 176)
 HEALTH_GREEN = (78, 194, 118)
 ZONE_BLUE = (92, 172, 255)
 ZONE_DANGER = (235, 116, 116)
-ZONE_INITIAL_MARGIN = 220.0
+ZONE_INITIAL_MARGIN = 360.0
 ZONE_INITIAL_HOLD_BONUS = 18.0
 ZONE_INITIAL_SHRINK_BONUS = 5.0
 SPAWN_MIN_SEPARATION = 420.0
@@ -261,11 +262,11 @@ WEAPON_LIBRARY = {
 
 
 ZONE_PHASES = (
-    ZonePhase(hold_time=28.0, shrink_time=18.0, radius_scale=0.78, dps=5.0),
-    ZonePhase(hold_time=23.0, shrink_time=17.0, radius_scale=0.58, dps=7.0),
-    ZonePhase(hold_time=19.0, shrink_time=15.0, radius_scale=0.41, dps=9.0),
-    ZonePhase(hold_time=15.0, shrink_time=13.0, radius_scale=0.27, dps=12.0),
-    ZonePhase(hold_time=12.0, shrink_time=11.0, radius_scale=0.16, dps=16.0),
+    ZonePhase(hold_time=30.0, shrink_time=19.0, radius_scale=0.84, dps=4.5),
+    ZonePhase(hold_time=25.0, shrink_time=18.0, radius_scale=0.67, dps=6.5),
+    ZonePhase(hold_time=21.0, shrink_time=16.0, radius_scale=0.52, dps=8.5),
+    ZonePhase(hold_time=17.0, shrink_time=14.0, radius_scale=0.38, dps=11.5),
+    ZonePhase(hold_time=14.0, shrink_time=12.0, radius_scale=0.24, dps=15.0),
 )
 
 ARENA_THEMES = (
@@ -276,13 +277,13 @@ ARENA_THEMES = (
         description=(
             "中路主街风险最高，视野最强，也是最适合正面对枪的区域。",
             "左侧近战巷道与右侧压制高台会形成明确的战术分流。",
-            "补给区、危险区和机关区都由 TMX trigger 直接驱动。",
+            "补给区、危险区和机关区直接驱动。",
         ),
         accent=(104, 214, 255),
         width=3840,
         height=2560,
         tmx_path=str(TMX_ROOT / "cyber_city.tmx"),
-        preview_image_path=str(RESOURCE_ROOT / "img" / "cyber_city_bg_v4.png"),
+        preview_image_path=str(RESOURCE_ROOT / "img" / "cyber_city_bg_v5.png"),
     ),
     MapData(
         identifier="village_tmx",
@@ -294,8 +295,8 @@ ARENA_THEMES = (
             "物件密度高，适合练掩体拉扯和多方向推进。",
         ),
         accent=(236, 188, 92),
-        width=3780,
-        height=2395,
+        width=4600,
+        height=3200,
         tmx_path=str(TMX_ROOT / "village1.tmx"),
         preview_image_path=str(RESOURCE_ROOT / "img" / "village.jpg"),
     ),
@@ -309,8 +310,8 @@ ARENA_THEMES = (
             "边缘地带适合绕侧，中心台阶更适合中近距离交战。",
         ),
         accent=(230, 154, 90),
-        width=1999,
-        height=1495,
+        width=3800,
+        height=2800,
         tmx_path=str(TMX_ROOT / "temple1.tmx"),
         preview_image_path=str(RESOURCE_ROOT / "img" / "temple.jpg"),
     ),
@@ -324,10 +325,10 @@ ARENA_THEMES = (
             "路径层天然构成推进路线，适合做更细致的碰撞和巡逻。",
         ),
         accent=(111, 205, 169),
-        width=1376,
-        height=768,
+        width=3600,
+        height=2600,
         tmx_path=str(TMX_ROOT / "scene.tmx"),
-        preview_image_path=str(RESOURCE_ROOT / "img" / "古色地图.png"),
+        preview_image_path=str(RESOURCE_ROOT / "img" / "courtyard_modern.png"),
     ),
 )
 

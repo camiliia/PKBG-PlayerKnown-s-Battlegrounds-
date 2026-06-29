@@ -10,6 +10,7 @@ from ..helpers import draw_outlined_text, draw_text_block
 class SettingsScene(BaseScene):
     def __init__(self, game) -> None:
         super().__init__(game)
+        self.game.audio.stop_ambient()
         self.game.audio.play_music("menu")
         self.index = 0
         self.entries = ["帧率上限", "主音量", "音乐音量", "音效音量", "鼠标灵敏度"]

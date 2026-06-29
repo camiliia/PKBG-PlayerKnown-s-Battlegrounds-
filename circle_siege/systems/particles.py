@@ -20,11 +20,12 @@ class ImpactEffect:
         self.radius += 36 * dt
         return self.ttl > 0
 
-    def draw(self, surface: pygame.Surface, camera: Vector2) -> None:
+    def draw(self, surface: pygame.Surface, camera) -> None:
         alpha = max(0, min(255, int(255 * (self.ttl / 0.22))))
         ring = pygame.Surface((int(self.radius * 4), int(self.radius * 4)), pygame.SRCALPHA)
         pygame.draw.circle(ring, (*self.color, alpha), (ring.get_width() // 2, ring.get_height() // 2), int(self.radius), width=2)
-        surface.blit(ring, (int(self.position.x - camera.x - ring.get_width() / 2), int(self.position.y - camera.y - ring.get_height() / 2)))
+        center = camera.world_to_screen(self.position)
+        surface.blit(ring, (int(center[0] - ring.get_width() / 2), int(center[1] - ring.get_height() / 2)))
 
 
 @dataclass
@@ -39,13 +40,13 @@ class DamageNumber:
         self.position.y -= 36 * dt
         return self.ttl > 0
 
-    def draw(self, surface: pygame.Surface, camera: Vector2, font: pygame.font.Font) -> None:
+    def draw(self, surface: pygame.Surface, camera, font: pygame.font.Font) -> None:
         alpha = max(0, min(255, int(255 * (self.ttl / 0.7))))
         text = font.render(str(self.value), True, self.color)
         tint = pygame.Surface(text.get_size(), pygame.SRCALPHA)
         tint.fill((255, 255, 255, alpha))
         text.blit(tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-        rect = text.get_rect(center=(int(self.position.x - camera.x), int(self.position.y - camera.y)))
+        rect = text.get_rect(center=camera.world_to_screen(self.position))
         surface.blit(text, rect)
 
 
@@ -108,7 +109,7 @@ class ParticleSystem:
             for drop in self.rain_drops:
                 drop.update(dt, width, height, self._rain_rng)
 
-    def draw(self, surface: pygame.Surface, camera: Vector2, font: pygame.font.Font | None = None) -> None:
+    def draw(self, surface: pygame.Surface, camera, font: pygame.font.Font | None = None) -> None:
         for effect in self.effects:
             effect.draw(surface, camera)
         if font is not None:

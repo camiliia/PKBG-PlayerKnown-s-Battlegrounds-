@@ -217,8 +217,8 @@ def _cover_points_from_rect(rect: pygame.Rect) -> list[Vector2]:
 def _obstacle_rect(obj, *, has_image_backdrop: bool) -> pygame.Rect:
     width = int(round(getattr(obj, "width", 0) or 0))
     height = int(round(getattr(obj, "height", 0) or 0))
-    min_thickness = 20 if has_image_backdrop else 12
-    collision_pad = 10 if has_image_backdrop else 2
+    min_thickness = 12 if has_image_backdrop else 10
+    collision_pad = 4 if has_image_backdrop else 2
 
     if width <= 0 and height <= 0:
         rect = pygame.Rect(int(round(obj.x - min_thickness / 2)), int(round(obj.y - min_thickness / 2)), min_thickness, min_thickness)
@@ -228,6 +228,12 @@ def _obstacle_rect(obj, *, has_image_backdrop: bool) -> pygame.Rect:
         if height <= 0:
             height = min_thickness
         rect = pygame.Rect(int(round(obj.x)), int(round(obj.y)), width, height)
+
+    smallest_edge = min(rect.width, rect.height)
+    if smallest_edge <= 14:
+        collision_pad = min(collision_pad, 1)
+    elif smallest_edge <= 28:
+        collision_pad = min(collision_pad, 2)
 
     if collision_pad > 0:
         rect = rect.inflate(collision_pad * 2, collision_pad * 2)

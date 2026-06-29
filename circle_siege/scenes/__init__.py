@@ -1,9 +1,10 @@
 """Scene layer."""
 
 from .battle_scene import BattleScene
+from .map_transition_scene import MapTransitionScene
 from .menu_scene import MenuScene
 from .profile_scene import ProfileScene
 from .result_scene import ResultScene
 from .settings_scene import SettingsScene
 
-__all__ = ["BattleScene", "MenuScene", "ProfileScene", "ResultScene", "SettingsScene"]
+__all__ = ["BattleScene", "MapTransitionScene", "MenuScene", "ProfileScene", "ResultScene", "SettingsScene"]

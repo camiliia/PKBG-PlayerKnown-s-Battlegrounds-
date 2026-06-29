@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import pygame
 
 from ..core.config import GRENADE_BLAST_RADIUS, GRENADE_COLOR, GRENADE_DAMAGE, GRENADE_FUSE_TIME
-from ..helpers import Vector2, circle_rect_collision, distance_to_segment
+from ..helpers import Vector2, distance_to_segment
 from .sprite_base import WorldSprite
 
 if TYPE_CHECKING:
@@ -76,7 +76,7 @@ class Bullet(WorldSprite):
             return self.position, None
         return None, None
 
-    def sync_visual(self, camera: Vector2) -> None:
+    def sync_visual(self, camera) -> None:
         size = self.radius * 2 + 18
         center = Vector2(size / 2, size / 2)
         image = pygame.Surface((size, size), pygame.SRCALPHA)
@@ -85,7 +85,7 @@ class Bullet(WorldSprite):
             tail = center - self.velocity.normalize() * 10
             pygame.draw.line(image, self.color, (int(center.x), int(center.y)), (int(tail.x), int(tail.y)), 2)
         self.image = image
-        self.rect = image.get_rect(center=(int(self.position.x - camera.x), int(self.position.y - camera.y)))
+        self.rect = image.get_rect(center=camera.world_to_screen(self.position))
         self.mask = pygame.mask.from_surface(self.image)
 
 
@@ -133,17 +133,13 @@ class Grenade(WorldSprite):
             attempted.y = max(self.radius, min(game_map.bounds.bottom - self.radius, attempted.y))
 
         test_x = Vector2(attempted.x, self.position.y)
-        for obstacle in game_map.obstacles:
-            if circle_rect_collision(test_x, self.radius, obstacle.rect):
-                self.velocity.x *= -0.52
-                attempted.x = self.position.x
-                break
+        if game_map.blocks_circle(test_x, self.radius):
+            self.velocity.x *= -0.52
+            attempted.x = self.position.x
         test_y = Vector2(attempted.x, attempted.y)
-        for obstacle in game_map.obstacles:
-            if circle_rect_collision(test_y, self.radius, obstacle.rect):
-                self.velocity.y *= -0.52
-                attempted.y = self.position.y
-                break
+        if game_map.blocks_circle(test_y, self.radius):
+            self.velocity.y *= -0.52
+            attempted.y = self.position.y
 
         self.position = attempted
         if self.fuse_time <= 0.0 or self.velocity.length_squared() <= 240.0 and self.fuse_time <= 0.22:
@@ -151,7 +147,7 @@ class Grenade(WorldSprite):
             return self.position.copy()
         return None
 
-    def sync_visual(self, camera: Vector2) -> None:
+    def sync_visual(self, camera) -> None:
         pulse_radius = self.radius + max(0, int((self.fuse_time % 0.2) * 8))
         size = pulse_radius * 2 + 16
         center = (size // 2, size // 2)
@@ -160,5 +156,5 @@ class Grenade(WorldSprite):
         pygame.draw.circle(image, self.color, center, pulse_radius)
         pygame.draw.circle(image, (252, 235, 188), center, pulse_radius, width=2)
         self.image = image
-        self.rect = image.get_rect(center=(int(self.position.x - camera.x), int(self.position.y - camera.y)))
+        self.rect = image.get_rect(center=camera.world_to_screen(self.position))
         self.mask = pygame.mask.from_surface(self.image)

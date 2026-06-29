@@ -110,6 +110,11 @@ class HUDRenderer:
             max_lines=1,
         )
 
+        energy_label = self.game.fonts["tiny"].render(f"鑳介噺 {self.match.player.energy}/{self.match.player.max_energy}", True, self.match.player.marker_color)
+        screen.blit(energy_label, (panel.left + 16, panel.bottom - 80))
+        energy_rect = pygame.Rect(panel.left + 16, panel.bottom - 62, panel.width - 32, 10)
+        draw_progress_bar(screen, energy_rect, self.match.player.energy / max(1, self.match.player.max_energy), self.match.player.accent_color)
+
         health_rect = pygame.Rect(panel.left + 16, panel.bottom - 42, panel.width - 32, 14)
         draw_progress_bar(screen, health_rect, self.match.player.hp / self.match.player.max_hp, HEALTH_GREEN)
         armor_rect = pygame.Rect(panel.left + 16, panel.bottom - 20, panel.width - 32, 11)
@@ -207,8 +212,8 @@ class HUDRenderer:
                 pygame.draw.circle(minimap, bot.marker_color, center, radius + 2, width=1)
 
         player_center = (int(self.match.player.position.x * scale_x), int(self.match.player.position.y * scale_y))
-        pygame.draw.circle(minimap, self.match.player.color, player_center, 5)
-        pygame.draw.circle(minimap, self.match.player.marker_color, player_center, 7, width=2)
+        pygame.draw.circle(minimap, self.match.player.color, player_center, 7)
+        pygame.draw.circle(minimap, self.match.player.marker_color, player_center, 10, width=2)
 
         frame = pygame.Rect(SCREEN_WIDTH - minimap.get_width() - 24, 18, minimap.get_width() + 12, minimap.get_height() + 40)
         pygame.draw.rect(screen, (*UI_PANEL, 235), frame, border_radius=14)
@@ -242,7 +247,8 @@ class HUDRenderer:
             return
         pos = camera.world_to_screen(self.match.player.position)
         label = self.game.fonts["small"].render(self.match.player.name, True, self.match.player.marker_color)
-        label_rect = label.get_rect(center=(pos[0], pos[1] - self.match.player.radius - 30))
+        vertical_gap = camera.project_vertical_distance(self.match.player.radius + 30)
+        label_rect = label.get_rect(center=(pos[0], pos[1] - vertical_gap))
         tag_rect = label_rect.inflate(16, 8)
         pygame.draw.rect(screen, (*UI_PANEL, 220), tag_rect, border_radius=10)
         pygame.draw.rect(screen, self.match.player.accent_color, tag_rect, width=2, border_radius=10)
@@ -295,7 +301,7 @@ class HUDRenderer:
             y += 18
 
     def _draw_debug_panel(self, screen: pygame.Surface, camera) -> None:
-        panel = pygame.Rect(SCREEN_WIDTH - 352, 250, 330, 332)
+        panel = pygame.Rect(SCREEN_WIDTH - 392, 230, 370, 392)
         pygame.draw.rect(screen, (12, 18, 23), panel, border_radius=16)
         pygame.draw.rect(screen, (106, 196, 248), panel, width=2, border_radius=16)
         title = self.game.fonts["medium"].render("调试面板", True, TEXT_LIGHT)
@@ -305,11 +311,17 @@ class HUDRenderer:
         camera_pos = f"{int(camera.position.x)}, {int(camera.position.y)}"
         zone_center = f"{int(self.match.safe_zone.current_center.x)}, {int(self.match.safe_zone.current_center.y)}"
         zone_state = {"hold": "等待", "shrink": "收缩", "final": "决赛"}[self.match.safe_zone.state]
+        move_input = self.match.player.debug_move_input
+        move_actual = self.match.player.debug_move_actual_delta
+        move_desired = self.match.player.debug_move_desired_delta
         lines = (
             f"呼号: {self.match.player.name}",
             f"FPS: {self.game.current_fps:5.1f}    dt: {self.game.delta_time * 1000:4.1f}ms",
             f"地图主题: {self.match.theme.label}",
             f"玩家坐标: {player_pos}",
+            f"Move input: {move_input.x:.0f}, {move_input.y:.0f}",
+            f"Move delta: {move_actual.x:.2f}, {move_actual.y:.2f} / {move_desired.x:.2f}, {move_desired.y:.2f}",
+            f"Move blocked: {self.match.player.debug_move_blocked}  slide: {self.match.player.debug_move_slide_used}",
             f"镜头坐标: {camera_pos}",
             f"当前区域: {self.match.game_map.nearest_landmark_name(self.match.player.position)}",
             f"血量/护甲: {self.match.player.hp}/{self.match.player.max_hp}  护甲 {self.match.player.armor}",
@@ -334,8 +346,8 @@ class HUDRenderer:
         view = camera.view_rect().inflate(120, 120)
         for obstacle in self.match.game_map.obstacles:
             if view.colliderect(obstacle.rect):
-                rect = obstacle.rect.move(-camera.position.x, -camera.position.y)
-                pygame.draw.rect(screen, (90, 232, 199), rect, width=1, border_radius=obstacle.border_radius)
+                rect = camera.world_rect_to_screen_bounds(obstacle.rect)
+                pygame.draw.rect(screen, (90, 232, 199), rect, width=1, border_radius=min(obstacle.border_radius, 8))
 
         state_colors = {
             "交战": (236, 118, 118),
@@ -357,7 +369,7 @@ class HUDRenderer:
             pygame.draw.line(screen, color, start, end, 2)
             pygame.draw.circle(screen, color, end, 5, width=1)
 
-        player_rect = self.match.player.rect().move(-camera.position.x, -camera.position.y)
+        player_rect = camera.world_rect_to_screen_bounds(self.match.player.rect())
         pygame.draw.rect(screen, self.match.player.marker_color, player_rect, width=1, border_radius=8)
         aim_end = camera.world_to_screen(mouse_world)
         pygame.draw.line(screen, self.match.player.marker_color, camera.world_to_screen(self.match.player.position), aim_end, 1)

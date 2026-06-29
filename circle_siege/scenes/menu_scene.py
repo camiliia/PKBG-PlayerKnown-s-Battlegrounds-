@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import random
+
 import pygame
 
 from ..core.base_scene import BaseScene
 from ..core.config import ARENA_THEMES, PLAYER_SKIN_BY_ID, SCREEN_HEIGHT, SCREEN_WIDTH, TEXT_LIGHT, TEXT_MUTED, UI_PANEL
+from ..entities.map import Map
 from ..helpers import draw_outlined_text, draw_text_block, truncate_text
-from ..maps.map_loader import load_tmx_bundle
 
 
 class MenuScene(BaseScene):
     def __init__(self, game) -> None:
         super().__init__(game)
+        self.game.audio.stop_ambient()
         self.game.audio.play_music("menu")
         self.theme_index = next(
             (index for index, theme in enumerate(ARENA_THEMES) if theme.identifier == self.game.selected_theme_id),
@@ -39,10 +42,10 @@ class MenuScene(BaseScene):
         self.theme = ARENA_THEMES[self.theme_index]
         self.game.selected_theme_id = self.theme.identifier
         preview = None
-        if self.theme.identifier == "courtyard_tmx" and self.theme.tmx_path:
-            preview = load_tmx_bundle(self.theme.tmx_path).surface
-        elif self.theme.preview_image_path:
+        if self.theme.preview_image_path:
             preview = self.game.resources.load_image(self.theme.preview_image_path)
+        elif self.theme.tmx_path:
+            preview = Map(random.Random(0), self.theme.identifier).ground_surface
         if preview is not None:
             self.preview_surface = self._cover_scale_preview(preview)
 

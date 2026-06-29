@@ -5,6 +5,9 @@ from pathlib import Path
 
 from PIL import Image
 
+ROW_BAND_MAX_GAP = 12
+COLUMN_BAND_MAX_GAP = 48
+
 
 def trim_alpha(image: Image.Image) -> Image.Image:
     alpha = image.getchannel("A")
@@ -96,6 +99,20 @@ def _nonzero_bands(projection: list[int], threshold: int = 10, max_gap: int = 0)
     return merged
 
 
+def _detect_row_bands(alpha: Image.Image, rows: int) -> list[tuple[int, int]]:
+    projection = _build_projection(alpha, "y")
+    row_bands = _nonzero_bands(projection, max_gap=ROW_BAND_MAX_GAP)
+    if len(row_bands) == rows:
+        return row_bands
+
+    # Some authored move sheets let adjacent stances overlap vertically.
+    # In that case, row peaks are more stable than raw nonzero spans.
+    row_centers = _find_peak_centers(projection, rows)
+    if not row_centers:
+        return row_bands
+    return _bands_from_centers(row_centers, alpha.height)
+
+
 def _component_center(box: tuple[int, int, int, int], axis: str) -> float:
     left, top, right, bottom = box
     if axis == "x":
@@ -147,7 +164,7 @@ def build_sheet(source_path: Path, output_path: Path, columns: int, rows: int, c
     with Image.open(source_path).convert("RGBA") as image:
         alpha = image.getchannel("A")
         if layout == "bands":
-            row_bands = _nonzero_bands(_build_projection(alpha, "y"), max_gap=12)
+            row_bands = _detect_row_bands(alpha, rows)
             if len(row_bands) != rows:
                 raise ValueError(f"Expected {rows} row bands in {source_path.name}, found {len(row_bands)}.")
             sheet = Image.new("RGBA", (cell_size * columns, cell_size * rows), (0, 0, 0, 0))
@@ -156,7 +173,7 @@ def build_sheet(source_path: Path, output_path: Path, columns: int, rows: int, c
                     sum(1 for y in range(top, bottom) if alpha.getpixel((x, y)) > 20)
                     for x in range(image.width)
                 ]
-                col_bands = _nonzero_bands(band_projection, max_gap=48)
+                col_bands = _nonzero_bands(band_projection, max_gap=COLUMN_BAND_MAX_GAP)
                 if len(col_bands) != columns:
                     raise ValueError(
                         f"Expected {columns} column bands in row {row + 1} of {source_path.name}, found {len(col_bands)}."

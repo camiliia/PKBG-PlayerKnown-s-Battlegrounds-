@@ -73,6 +73,11 @@ class CharacterBase(WorldSprite):
         self.damage_dealt = 0
         self.aim_direction = Vector2(1, 0)
         self.last_move = Vector2()
+        self.debug_move_input = Vector2()
+        self.debug_move_desired_delta = Vector2()
+        self.debug_move_actual_delta = Vector2()
+        self.debug_move_blocked = False
+        self.debug_move_slide_used = False
         self.heal_timer = 0.0
         self.damage_flash_timer = 0.0
         self.muzzle_flash_timer = 0.0
@@ -91,6 +96,9 @@ class CharacterBase(WorldSprite):
         self.shield_effect_base: pygame.Surface | None = None
         self.shield_effect_scale = 1.0
         self.is_elite = False
+        self.visual_scale_multiplier = 1.0
+        self.sprite_tint: tuple[int, int, int] | None = None
+        self.sprite_tint_strength = 0
 
     @property
     def active_weapon(self) -> Weapon:
@@ -281,24 +289,77 @@ class CharacterBase(WorldSprite):
         if self.heal_timer > 0.0:
             self.last_move = Vector2()
             self.velocity = Vector2()
+            self._set_move_debug(Vector2(), Vector2(), Vector2(), blocked=False, slide_used=False)
             return
-        direction = safe_normalize(direction)
+        raw_direction = Vector2(direction)
+        direction = safe_normalize(raw_direction)
         delta = direction * speed * dt
-        self.last_move = delta
-        self.velocity = delta / max(dt, 1e-6) if delta.length_squared() > 0 else Vector2()
         if delta.length_squared() <= 0:
+            self.last_move = Vector2()
+            self.velocity = Vector2()
+            self._set_move_debug(raw_direction, delta, Vector2(), blocked=False, slide_used=False)
             if self.state not in {"fire", "hit", "heal", "dead"}:
                 self.state = "idle"
             return
         self.state = "run" if speed > self.move_speed * 1.1 else "move"
+        start_position = self.position.copy()
+        collided = self._move_by_delta(delta, game_map)
+        actual_delta = self.position - start_position
+        slide_used = False
+
+        blocked_threshold = max(0.45, delta.length() * 0.18)
+        if collided and actual_delta.length() <= blocked_threshold:
+            normal_position = self.position.copy()
+            slide_position, slide_delta = self._best_slide_position(start_position, delta, game_map)
+            if slide_delta.length_squared() > actual_delta.length_squared():
+                self.position = slide_position
+                actual_delta = slide_delta
+                slide_used = True
+            else:
+                self.position = normal_position
+
+        self.last_move = actual_delta
+        self.velocity = actual_delta / max(dt, 1e-6) if actual_delta.length_squared() > 0 else Vector2()
+        self._set_move_debug(raw_direction, delta, actual_delta, blocked=collided and actual_delta.length() <= blocked_threshold, slide_used=slide_used)
+
+    def _move_by_delta(self, delta: Vector2, game_map: Map) -> bool:
+        collided = False
+        self.last_move = delta
         previous_x = self.position.x
         self.position.x += delta.x
+        attempted_x = self.position.x
         self._resolve_collisions(game_map, axis="x", fallback_position=previous_x)
+        collided = collided or abs(self.position.x - attempted_x) > 0.001
         previous_y = self.position.y
         self.position.y += delta.y
+        attempted_y = self.position.y
         self._resolve_collisions(game_map, axis="y", fallback_position=previous_y)
+        collided = collided or abs(self.position.y - attempted_y) > 0.001
+        before_clamp = self.position.copy()
         self.position.x = max(self.radius, min(game_map.bounds.right - self.radius, self.position.x))
         self.position.y = max(self.radius, min(game_map.bounds.bottom - self.radius, self.position.y))
+        return collided or self.position.distance_squared_to(before_clamp) > 0.001
+
+    def _best_slide_position(self, start_position: Vector2, delta: Vector2, game_map: Map) -> tuple[Vector2, Vector2]:
+        if abs(delta.x) <= 0.001 or abs(delta.y) <= 0.001:
+            return start_position.copy(), Vector2()
+        best_position = start_position.copy()
+        best_delta = Vector2()
+        for slide_delta in (Vector2(delta.x, 0), Vector2(0, delta.y)):
+            self.position = start_position.copy()
+            self._move_by_delta(slide_delta, game_map)
+            actual = self.position - start_position
+            if actual.length_squared() > best_delta.length_squared():
+                best_position = self.position.copy()
+                best_delta = actual
+        return best_position, best_delta
+
+    def _set_move_debug(self, raw_input: Vector2, desired_delta: Vector2, actual_delta: Vector2, *, blocked: bool, slide_used: bool) -> None:
+        self.debug_move_input = Vector2(raw_input)
+        self.debug_move_desired_delta = Vector2(desired_delta)
+        self.debug_move_actual_delta = Vector2(actual_delta)
+        self.debug_move_blocked = blocked
+        self.debug_move_slide_used = slide_used
 
     def _resolve_collisions(self, game_map: Map, axis: str, fallback_position: float) -> None:
         if game_map.point_in_open_passage(self.position):
@@ -499,13 +560,19 @@ class CharacterBase(WorldSprite):
         weapon_tail = self._local_point(center, right, forward, 2.0, -18.0)
         pygame.draw.line(image, (26, 30, 34), weapon_tail, weapon_tip, 5)
 
-    def sync_visual(self, camera: Vector2) -> None:
+    def sync_visual(self, camera) -> None:
         self._sync_state_clock(0.0)
-        canvas_size = self.radius * 2 + 58
+        visual_scale = max(0.5, float(getattr(self, "visual_scale_multiplier", 1.0)))
+        canvas_size = int((self.radius * 2 + 58) * visual_scale)
         center = Vector2(canvas_size / 2, canvas_size / 2)
         image = pygame.Surface((canvas_size, canvas_size), pygame.SRCALPHA)
+        screen_pos = camera.world_to_screen(self.position)
+        ground_anchor = (screen_pos[0], screen_pos[1] + max(8, int(self.radius * 0.9)))
 
-        facing = safe_normalize(self.aim_direction if self.aim_direction.length_squared() > 0 else self.last_move)
+        facing_source = self.aim_direction if self.aim_direction.length_squared() > 0 else self.last_move
+        if not self.is_player_controlled and self.alive and self.state in {"move", "run"} and self.last_move.length_squared() > 0.0:
+            facing_source = self.last_move
+        facing = safe_normalize(facing_source)
         if facing.length_squared() <= 0:
             facing = Vector2(1, 0)
         forward = facing
@@ -523,6 +590,18 @@ class CharacterBase(WorldSprite):
             mask_surface = pygame.Surface((canvas_size, canvas_size), pygame.SRCALPHA)
             controller = self.animation_controller
             sprite = controller.get_frame(forward, self._animation_state_name(), self.state_time).copy() if controller is not None else self.sprite_base.copy()
+            if visual_scale != 1.0:
+                sprite = pygame.transform.smoothscale(
+                    sprite,
+                    (
+                        max(1, int(sprite.get_width() * visual_scale)),
+                        max(1, int(sprite.get_height() * visual_scale)),
+                    ),
+                )
+            if self.sprite_tint is not None and self.sprite_tint_strength > 0:
+                tint = pygame.Surface(sprite.get_size(), pygame.SRCALPHA)
+                tint.fill((*self.sprite_tint, max(0, min(255, self.sprite_tint_strength))))
+                sprite.blit(tint, (0, 0), special_flags=pygame.BLEND_RGBA_ADD)
             if self.damage_flash_timer > 0.0 and self.alive:
                 sprite.fill((34, 0, 0, 0), special_flags=pygame.BLEND_RGBA_SUB)
                 sprite.fill((84, 24, 24, 0), special_flags=pygame.BLEND_RGBA_ADD)
@@ -556,6 +635,20 @@ class CharacterBase(WorldSprite):
                     elite_rect.center = (int(body_center.x), int(body_center.y))
                     pygame.draw.arc(image, self.accent_color, elite_rect, math.radians(18), math.radians(154), 2)
                     pygame.draw.arc(image, self.accent_color, elite_rect, math.radians(206), math.radians(340), 2)
+                if getattr(self, "is_treasure_boss", False):
+                    boss_rect = pygame.Rect(0, 0, (self.radius + 23) * 2, (self.radius + 23) * 2)
+                    boss_rect.center = (int(body_center.x), int(body_center.y))
+                    pygame.draw.arc(image, self.marker_color, boss_rect, math.radians(10), math.radians(170), 3)
+                    pygame.draw.arc(image, self.marker_color, boss_rect, math.radians(190), math.radians(350), 3)
+                    crown_y = int(body_center.y - self.radius - 23)
+                    crown = [
+                        (int(body_center.x - 10), crown_y + 8),
+                        (int(body_center.x - 5), crown_y),
+                        (int(body_center.x), crown_y + 8),
+                        (int(body_center.x + 5), crown_y),
+                        (int(body_center.x + 10), crown_y + 8),
+                    ]
+                    pygame.draw.lines(image, self.marker_color, False, crown, 3)
 
             if self.heal_timer > 0.0:
                 pulse_rect = pygame.Rect(0, 0, 18, 18)
@@ -587,14 +680,14 @@ class CharacterBase(WorldSprite):
                 pygame.draw.rect(image, (92, 172, 255), armor_fill, border_radius=2)
 
             self.image = image
-            self.rect = image.get_rect(center=(int(self.position.x - camera.x), int(self.position.y - camera.y)))
+            self.rect = image.get_rect(midbottom=ground_anchor)
             self.mask = pygame.mask.from_surface(mask_surface)
             return
 
         if not self.alive:
             self._draw_downed_model(image, body_center, forward, right)
             self.image = image
-            self.rect = image.get_rect(center=(int(self.position.x - camera.x), int(self.position.y - camera.y)))
+            self.rect = image.get_rect(midbottom=ground_anchor)
             self.mask = pygame.mask.from_surface(self.image)
             return
 
@@ -722,7 +815,7 @@ class CharacterBase(WorldSprite):
             pygame.draw.rect(image, (92, 172, 255), armor_fill, border_radius=2)
 
         self.image = image
-        self.rect = image.get_rect(center=(int(self.position.x - camera.x), int(self.position.y - camera.y)))
+        self.rect = image.get_rect(midbottom=ground_anchor)
         self.mask = pygame.mask.from_surface(self.image)
 
 

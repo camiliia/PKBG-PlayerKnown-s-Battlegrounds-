@@ -12,12 +12,12 @@ from .sprite_base import WorldSprite
 
 class Pickup(WorldSprite):
     PICKUP_ASSET_ROOT = RESOURCE_ROOT / "img" / "pickups"
-    TREASURE_BOX = (60, 60)
+    TREASURE_BOX = (72, 72)
     WEAPON_BOXES: dict[str, tuple[int, int]] = {
-        "smg": (60, 60),
-        "carbine": (68, 68),
-        "shotgun": (72, 60),
-        "dmr": (84, 56),
+        "smg": (68, 68),
+        "carbine": (76, 76),
+        "shotgun": (84, 68),
+        "dmr": (96, 64),
     }
     WEAPON_IMAGE_PATHS: dict[str, Path] = {
         "smg": PICKUP_ASSET_ROOT / "pickup_weapon_smg.png",
@@ -57,12 +57,13 @@ class Pickup(WorldSprite):
             return f"{AMMO_LABELS.get(self.ammo_type, self.ammo_type)}弹药 +{self.amount}"
         return f"医疗包 +{self.amount}"
 
-    def sync_visual(self, camera: Vector2) -> None:
+    def sync_visual(self, camera) -> None:
         image = self._build_asset_visual()
         if image is None:
             image = self._build_fallback_visual()
         self.image = image
-        self.rect = image.get_rect(center=(int(self.position.x - camera.x), int(self.position.y - camera.y)))
+        screen_pos = camera.world_to_screen(self.position)
+        self.rect = image.get_rect(midbottom=(screen_pos[0], screen_pos[1] + 10))
         self.mask = pygame.mask.from_surface(self.image)
 
     def _build_asset_visual(self) -> pygame.Surface | None:

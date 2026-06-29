@@ -10,6 +10,7 @@ from ..helpers import draw_outlined_text, draw_text_block, format_time, truncate
 class ResultScene(BaseScene):
     def __init__(self, game, summary: dict[str, object]) -> None:
         super().__init__(game)
+        self.game.audio.stop_ambient()
         self.game.audio.play_music("menu")
         self.summary = summary
         self.theme_id = str(summary.get("theme_id", DEFAULT_THEME_ID))
